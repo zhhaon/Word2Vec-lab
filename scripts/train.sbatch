@@ -34,9 +34,17 @@ nvidia-smi
 
 python scripts/gpu_check.py
 
+# 评测集提前拉，免得训练跑完才发现下不动（无外网就本地下好再 scp 过来）
+python -m src.eval_data --fetch
+
+SIM=$(python -c "import yaml;print(yaml.safe_load(open('configs/full.yaml'))['eval']['similarity_file'])")
+ANA=$(python -c "import yaml;print(yaml.safe_load(open('configs/full.yaml'))['eval']['analogy_file'])")
+
 python -m src.collect    --source text8
 python -m src.preprocess --config configs/full.yaml
 python -m src.train      --config configs/full.yaml --viz
-python -m src.evaluate   --vectors runs/full/vectors.npz --out runs/full/eval.json
+python -m src.evaluate   --vectors runs/full/vectors.npz \
+                         --similarity "$SIM" --analogy "$ANA" \
+                         --out runs/full/eval.json
 
 echo "完成: $(date '+%F %T')"

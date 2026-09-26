@@ -49,8 +49,11 @@ train:
 eval:
   every_epochs: 4           # 每 N 个 epoch 评估一次
   topk: 10
+  # tiny 用内置小评测集：离线、秒级
+  # （内置集是围绕 demo 语料写的，换成 wordsim353 覆盖率会很低，指标没有意义）
   similarity_file: data/eval/similarity_pairs.txt
   analogy_file: data/eval/analogy_questions.txt
+  fetch: false
 
 viz:
   # demo 语料用带类别的词表，画出来会按语义簇上色，效果直观

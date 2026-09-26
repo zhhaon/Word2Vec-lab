@@ -10,9 +10,9 @@ CBOW
     把上下文向量取平均得到 v_ctx，其余与 Skip-gram 相同。
 
 实现细节说明（都是实际训练里的坑）：
-    * Embedding 使用 sparse=True：V=25 万、D=300 时，稠密梯度每步要写
-      7500 万个 float（300MB），稀疏梯度只更新 batch 里出现的几千行，快得多；
-      因此配套使用 torch.optim.SparseAdam（AdamW 不支持稀疏梯度）。
+    * Embedding 使用 sparse=True：本项目 text8 的 V≈7.1 万、D=300，稠密梯度
+      每步要写 2140 万个 float（86MB），稀疏梯度只更新 batch 里出现的几千行，
+      快得多；因此配套使用 torch.optim.SparseAdam（AdamW 不支持稀疏梯度）。
     * 正样本与 K 个负样本拼在一起做一次 BCEWithLogits，等价于原式但更省事、数值更稳。
     * 初始化 U(-0.5/D, 0.5/D)，与原论文 / gensim 一致。
 """

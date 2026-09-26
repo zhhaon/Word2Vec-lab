@@ -13,6 +13,10 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
+# ---------- 公开评测数据集缓存（用 `make evaldata` 重新下载） ----------
+# 注意：data/eval/*.txt（内置小评测集）是入库的
+data/eval/downloaded/
+
 # ---------- 训练产物 ----------
 runs/
 checkpoints/

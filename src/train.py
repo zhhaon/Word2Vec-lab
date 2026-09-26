@@ -375,10 +375,11 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
         try:
             from .evaluate import evaluate_from_npz
 
-            ev = cfg.get("eval", {})
+            ev = cfg.get("eval", {}) or {}
             res = evaluate_from_npz(npz_path, ev.get("similarity_file"),
                                     ev.get("analogy_file"), int(ev.get("topk", 10)),
-                                    logger=logger)
+                                    logger=logger,
+                                    fetch_eval=bool(ev.get("fetch", True)))
             from .utils import save_json
 
             save_json(res, out_dir / "eval.json")
@@ -416,7 +417,13 @@ def export_vectors(model, vocab: Vocab, out_dir: Path, how: str = "input"):
 
 def _quick_eval(model, vocab: Vocab, out_dir: Path, epoch: int,
                 cfg: Dict[str, Any], logger) -> None:
-    """训练途中的轻量评估：导出当前向量并算指标，方便观察收敛过程。"""
+    """训练途中的轻量评估：导出当前向量并算指标，方便观察收敛过程。
+
+    刻意固定用「内置小评测集」，不用配置里的 wordsim353 / google-analogy：
+      * 内置集不联网、秒级完成，不会打断训练节奏；
+      * 每个 epoch 都用同一套题，指标在 epoch 之间才可比。
+    正式的全量指标在训练结束后由主流程统一算。
+    """
     try:
         from .evaluate import evaluate_from_npz
 
@@ -426,11 +433,15 @@ def _quick_eval(model, vocab: Vocab, out_dir: Path, epoch: int,
                                    model.export_vectors(
                                        cfg["model"].get("export", "input")
                                    ).float().cpu().numpy())
-        res = evaluate_from_npz(npz_path, ev.get("similarity_file"),
-                                ev.get("analogy_file"), int(ev.get("topk", 10)))
+        res = evaluate_from_npz(npz_path,
+                                "data/eval/similarity_pairs.txt",
+                                "data/eval/analogy_questions.txt",
+                                int(ev.get("topk", 10)),
+                                fetch_eval=False, max_analogy=2000)
         sim = res.get("similarity", {}).get("spearman", float("nan"))
         ana = res.get("analogy", {}).get("accuracy", float("nan"))
-        logger.info("  [epoch %d 中途评估] 相似度 rho=%.4f  类比 acc=%.4f", epoch, sim, ana)
+        logger.info("  [epoch %d 中途评估·内置子集] 相似度 rho=%.4f  类比 acc=%.4f",
+                    epoch, sim, ana)
     except Exception as exc:  # noqa: BLE001
         logger.warning("  中途评估失败: %s", exc)
 

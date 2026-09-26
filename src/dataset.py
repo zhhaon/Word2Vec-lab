@@ -207,10 +207,22 @@ class PairStream:
 # --------------------------------------------------------------------------
 def preview(stream: PairStream, k: int = 12, batch_size: int = 512) -> None:
     itos = stream.vocab.itos
+    # 必须先 prepare：否则 tokens_per_epoch 拿到的是「下采样前」的原始 token 数，
+    # 会让人以为 subsample 没生效。这里顺手把削减比例打出来。
+    raw_tokens = len(stream.tokens)
+    stream.prepare(0)
+
     print(f"\n结构: {stream.arch}  窗口: ±{stream.window}  "
           f"subsample: {stream.subsample}")
-    print(f"每 epoch 有效 token: {human_int(stream.tokens_per_epoch)}  "
-          f"预计样本对: {human_int(stream.pairs_per_epoch)}")
+    print(f"语料 token: {human_int(raw_tokens)}", end="")
+    if stream.subsample and stream.subsample > 0:
+        keep = stream.tokens_per_epoch / max(1, raw_tokens)
+        print(f"  --高频词下采样-->  每 epoch 有效 token: "
+              f"{human_int(stream.tokens_per_epoch)}（保留 {keep * 100:.1f}%）")
+    else:
+        print(f"  每 epoch 有效 token: {human_int(stream.tokens_per_epoch)}"
+              "（未启用下采样）")
+    print(f"预计样本对: {human_int(stream.pairs_per_epoch)} / epoch")
     print("\n样本示例（中心词 -> 上下文）:")
     shown = 0
     for center, context in stream.iter_batches(batch_size=batch_size, epoch=0):

@@ -1,18 +1,22 @@
 # ============================================================
 # full：正式训练配置（在服务器 RTX 5090 上跑）
 #
-# 预算估算（text8，约 1700 万词，skip-gram，window=5）：
-#   正样本对 ≈ token 数 × (window+1)。subsample=1e-4 会先砍掉约 6 成 token，
-#   所以每 epoch 大约 4e7 个样本对。
+# 下面这些数字是在真实 text8 上实测出来的，不是拍脑袋估的：
+#   语料 token            17,005,207  （17.01M）
+#   词表(min_count=5)         71,292  （<unk> 占 1.68%）
+#   subsample=1e-4 之后    9.67M token（保留 56.9%）
+#   每 epoch 样本对        58.04M     （= 有效 token × (window+1)）
 #
 #   ⚠️ 瓶颈不在 GPU，而在数据管道：
 #      负采样放在预取线程里用 numpy 做（避免每步 GPU→CPU 同步），
 #      实测「PairStream + 负采样」吞吐 ≈ 86 万样本对/秒，
-#      而 5090 算这个小模型绰绰有余。
-#      → 单 epoch ≈ 50 秒，5 个 epoch ≈ 4~5 分钟。
-#      服务器 CPU 再慢一倍也远低于 6 小时上限。
+#      而 5090 算这个 4280 万参数的小模型绰绰有余。
+#      → 单 epoch ≈ 70 秒，5 个 epoch ≈ 6 分钟；
+#        服务器 CPU 再慢一倍也远低于 6 小时上限。
 #
 #   max_minutes: 330 只是兜底保护，正常跑根本摸不到；超时会优雅停止并保存。
+#   想看每条实测数字，随时可以跑：
+#       python -m src.dataset --config configs/full.yaml --show 5
 # ============================================================
 run_name: full
 seed: 42
@@ -52,9 +56,17 @@ train:
 
 eval:
   every_epochs: 2            # 每隔 2 个 epoch 做一次中途评估（5 epoch 时会在 2、4 处看指标）
+                             # 中途评估固定用内置小评测集，不联网、秒级、epoch 间可比
   topk: 10
-  similarity_file: data/eval/similarity_pairs.txt
-  analogy_file: data/eval/analogy_questions.txt
+  # 训练结束后的正式评估：用完整的公开标准数据集，指标才可与论文对比
+  #   wordsim353      WordSim-353 全量（353 行 / 352 个唯一词对）
+  #   google-analogy  Google Analogy Dataset（19544 题 / 14 类，含语义/句法分组）
+  # 首次运行会自动下载并缓存到 data/eval/downloaded/；
+  # 也可以提前手动拉取： python -m src.eval_data --fetch
+  # 下载失败会自动回退到内置小评测集，不会中断流程。
+  similarity_file: wordsim353
+  analogy_file: google-analogy
+  fetch: true                # false = 只用本地缓存，完全离线
 
 viz:
   words_file: null

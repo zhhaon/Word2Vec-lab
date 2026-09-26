@@ -194,7 +194,7 @@ class NegativeSampler:
         extra   : (B,) 或 (B, M)，可选。同属假负样本的额外禁用词
                   （Skip-gram 传中心词，CBOW 传整条上下文），可为 None
         max_tries : 拒绝采样轮数上限。词表正常时一轮就结束
-                    （冲突概率约 K/V，V=25 万时约 4e-5）
+                    （冲突概率约 K/V；text8 的 V≈7.1 万、K=10 时约 1.4e-4）
 
         返回 (B, K) int32 数组。
         """

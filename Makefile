@@ -8,18 +8,25 @@ PY ?= python
 CONFIG ?= configs/full.yaml
 SOURCE ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('$(CONFIG)'))['data']['source'])")
 RUN ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('$(CONFIG)'))['run_name'])")
+# 留空则自动取词频最高的词；填 data/samples/demo_words.txt 会按语义类别上色
+WORDS_FILE ?=
+# 评测集默认跟随配置文件：full 用 wordsim353 + google-analogy，tiny 用内置小集
+SIM ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('$(CONFIG)'))['eval']['similarity_file'])")
+ANA ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('$(CONFIG)'))['eval']['analogy_file'])")
 
-.PHONY: help check install data preprocess preview train resume eval infer viz local all clean-dist
+.PHONY: help check install data preprocess preview train resume eval evaldata datasets infer viz local all clean-dist
 
 help:
 	@echo "make check         # GPU / 环境体检（服务器上先跑这个）"
 	@echo "make install       # 安装依赖（torch 需先按 README 单独装 cu128 版）"
 	@echo "make data          # 下载语料（SOURCE=text8 / wikitext2 / demo）"
+	@echo "make evaldata      # 下载公开评测集（WordSim-353 / Google Analogy）"
+	@echo "make datasets      # 列出可选评测集及缓存状态"
 	@echo "make preprocess    # 清洗 + 分词 + 词表 + ID 序列"
 	@echo "make preview       # 打印生成的训练样本，肉眼检查"
 	@echo "make train         # 训练（CONFIG=configs/full.yaml）"
 	@echo "make resume        # 从 runs/<RUN>/last.pt 续训"
-	@echo "make eval          # 评估（相似度 + 类比）"
+	@echo "make eval          # 评估（配置里指定评测集；full 用 wordsim353 + google-analogy）"
 	@echo "make infer         # 交互式推理"
 	@echo "make viz           # 出可视化图"
 	@echo "make local         # 端到端跑一遍 tiny 配置（CPU）"
@@ -46,8 +53,15 @@ train:
 resume:
 	$(PY) -m src.train --config $(CONFIG) --resume runs/$(RUN)/last.pt
 
+evaldata:
+	$(PY) -m src.eval_data --fetch
+
+datasets:
+	$(PY) -m src.eval_data --list
+
 eval:
-	$(PY) -m src.evaluate --vectors runs/$(RUN)/vectors.npz --out runs/$(RUN)/eval.json
+	$(PY) -m src.evaluate --vectors runs/$(RUN)/vectors.npz \
+		--similarity "$(SIM)" --analogy "$(ANA)" --out runs/$(RUN)/eval.json
 
 infer:
 	$(PY) -m src.infer --vectors runs/$(RUN)/vectors.npz

@@ -284,6 +284,133 @@ def test_preprocess_roundtrip() -> None:
     check(meta["total_tokens_used"] == len(tokens), "meta 统计与数据一致")
 
 
+def test_eval_data_parsers() -> None:
+    print("\n[9] 评测集解析（WordSim-353 / Google Analogy 格式）")
+    from src import eval_data
+
+    # tab 分隔（word-sim 标准格式）
+    tab = eval_data.parse_similarity_text("love\tsex\t6.77\ntiger\tcat\t7.35\n")
+    check(tab == [("love", "sex", 6.77), ("tiger", "cat", 7.35)], f"tab 格式: {tab}")
+
+    # 空格分隔 + 注释（内置小评测集格式）
+    sp = eval_data.parse_similarity_text("# 注释\nking queen 8.5\n\nbanana pear 6.0\n")
+    check(sp == [("king", "queen", 8.5), ("banana", "pear", 6.0)], f"空格格式: {sp}")
+
+    # CSV 带表头（表头行必须被跳过）
+    csv = eval_data.parse_similarity_text(
+        "Word 1,Word 2,Human (mean)\nking,queen,8.5\n")
+    check(csv == [("king", "queen", 8.5)], f"CSV 表头被跳过: {csv}")
+
+    # 多词短语
+    mw = eval_data.parse_similarity_text("new york city 5.5\n")
+    check(mw == [("new", "york city", 5.5)], f"多词短语: {mw}")
+
+    # 大小写统一转小写（Google Analogy 是首字母大写，词表是小写）
+    up = eval_data.parse_similarity_text("King\tQueen\t9.0\n")
+    check(up == [("king", "queen", 9.0)], f"统一小写: {up}")
+
+    # Google Analogy 的 ': 分组' 段头
+    ana = eval_data.parse_analogy_text(
+        ": capital-common-countries\n"
+        "Athens Greece Baghdad Iraq\n"
+        "Athens Greece Bangkok Thailand\n"
+        ": family\n"
+        "boy girl brother sister\n"
+    )
+    check(len(ana) == 3, f"解析出 3 道题: {len(ana)}")
+    check(ana[0] == ("athens", "greece", "baghdad", "iraq", "capital-common-countries"),
+          f"第 1 题解析正确: {ana[0]}")
+    check(ana[1][4] == "capital-common-countries" and ana[2][4] == "family",
+          "分组随段头切换")
+    check(all(w.islower() for q in ana for w in q[:4]), "题目单词全部转小写")
+
+    # 内置小评测集走的是另一个模块，两边必须兼容
+    from src.evaluate import read_analogy_questions, read_similarity_pairs
+
+    bundled = read_similarity_pairs("data/eval/similarity_pairs.txt")
+    check(len(bundled) > 40 and bundled[0][2] > 0, f"内置相似度集可读 ({len(bundled)} 对)")
+    check(all(len(q) == 4 for q in read_analogy_questions("data/eval/analogy_questions.txt")),
+          "内置类比集可读（4 元组）")
+
+
+def test_analogy_eval_logic() -> None:
+    print("\n[10] 类比评估逻辑（3CosAdd）")
+    from src.evaluate import eval_analogy
+    from src.vectors import EmbeddingMatrix
+
+    # 构造一个「性别方向」明确的空间：king - man + woman == queen
+    #   king=[1,0,1,0]  man=[0,1,1,0]  woman=[0,1,0,0]  queen=[1,0,0,0]
+    words = ["<unk>", "<pad>", "king", "queen", "man", "woman", "zzz"]
+    mat = np.array([
+        [0, 0, 0, 0],          # <unk>
+        [0, 0, 0, 0],          # <pad>
+        [1, 0, 1, 0],          # king
+        [1, 0, 0, 0],          # queen
+        [0, 1, 1, 0],          # man
+        [0, 1, 0, 0],          # woman
+        [0, 0, 0, 1],          # zzz（与答案正交的干扰项）
+    ], dtype=np.float32)
+    emb = EmbeddingMatrix(words, mat)
+
+    # man:king :: woman:? 的空间里答案确定是 queen；
+    # 后两题故意把 gold 写成 zzz，用来验证「答错也要被正确计入」
+    qs = [("man", "king", "woman", "queen", "family"),
+          ("man", "king", "woman", "queen", "family"),
+          ("man", "king", "woman", "zzz", "family"),
+          ("man", "king", "woman", "zzz", "family")]
+    res = eval_analogy(emb, qs, label="合成")
+    check(res["n_questions"] == 4 and res["n_evaluated"] == 4, "4 题全部可评估")
+    check(res["n_correct"] == 2, f"应只答对 2 题（实际 {res['n_correct']}）")
+    check(abs(res["accuracy"] - 0.5) < 1e-9,
+          f"准确率应为 0.5（实际 {res['accuracy']}）")
+
+    # 补充：全部答对的场景
+    res2 = eval_analogy(emb, qs[:2], label="合成")
+    check(abs(res2["accuracy"] - 1.0) < 1e-9, f"king-man+woman=queen 完全正确: {res2['accuracy']}")
+    check(res2["by_category"].get("family", {}).get("n") == 2, "按类别统计正确")
+
+    # 缺词：a/b/c 任一不在词表 -> 跳过并计入 n_oov_probe
+    res3 = eval_analogy(emb, [("nope", "king", "woman", "queen", "x")], label="合成")
+    check(res3["n_evaluated"] == 0 and res3["n_oov_probe"] == 1,
+          f"缺词题被正确跳过: {res3}")
+
+    # 答案本身缺词：仍计入分母（必然答错）
+    res4 = eval_analogy(emb, [("man", "king", "woman", "nope", "x")], label="合成")
+    check(res4["n_evaluated"] == 1 and res4["n_answer_oov"] == 1
+          and res4["accuracy"] == 0.0, f"答案缺词计为答错: {res4}")
+
+
+def test_cached_full_datasets() -> None:
+    print("\n[11] 已下载的标准数据集（有则校验，没有则跳过）")
+    from src import eval_data
+
+    ws = eval_data.cache_path("wordsim353")
+    if not ws.exists():
+        print("  [skip] wordsim353 未下载，先跑 `make evaldata`")
+        return
+    lab, pairs = eval_data.load_similarity("wordsim353")
+    scores = [p[2] for p in pairs]
+    check(len(pairs) == 353, f"WordSim-353 共 353 行（实际 {len(pairs)}）")
+    check(len({(a, b) for a, b, _ in pairs}) == 352,
+          "WordSim-353 有 352 个唯一词对（(money, cash) 重复一次）")
+    check(abs(min(scores) - 0.23) < 1e-6 and abs(max(scores) - 10.0) < 1e-6,
+          f"分值范围 0.23~10.00（实际 {min(scores)}~{max(scores)}）")
+
+    ga = eval_data.cache_path("google-analogy")
+    if not ga.exists():
+        print("  [skip] google-analogy 未下载")
+        return
+    lab, qs = eval_data.load_analogy("google-analogy")
+    cats = Counter(q[4] for q in qs)
+    check(len(qs) == 19544, f"Google Analogy 共 19544 题（实际 {len(qs)}）")
+    check(len(cats) == 14, f"共 14 个类别（实际 {len(cats)}）")
+    check(cats["family"] == 506 and cats["gram3-comparative"] == 1332,
+          f"各类题数与官方一致: family={cats['family']}, gram3={cats['gram3-comparative']}")
+    check(sum(cats[c] for c in eval_data.SEMANTIC_GROUPS) == 8869,
+          "语义类合计 8869 题，句法类 10675 题")
+    check(all(len(q) == 5 for q in qs), "每题都带类别标签")
+
+
 def main() -> None:
     try:
         for stream in (sys.stdout, sys.stderr):
@@ -297,7 +424,8 @@ def main() -> None:
                test_negative_sampling_excludes_target, test_train_time_negatives,
                test_pair_stream_skipgram, test_pair_stream_cbow,
                test_sentence_boundary, test_vectors_io,
-               test_preprocess_roundtrip):
+               test_preprocess_roundtrip, test_eval_data_parsers,
+               test_analogy_eval_logic, test_cached_full_datasets):
         fn()
     print("\n" + "=" * 66)
     print(f" 全部通过：{PASS} 项检查")

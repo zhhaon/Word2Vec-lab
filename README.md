@@ -4,6 +4,8 @@
 
 - 模型部分**不调用任何现成词向量库**，Skip-gram / CBOW + Negative Sampling 全部手写（约 150 行 PyTorch），每一行都能对应到论文公式。
 - 两档配置：`tiny`（1 分钟跑完，本地 CPU 即可）与 `full`（text8 语料 + RTX 5090，约 10~25 分钟）。
+- 正式评估用**完整的公开标准数据集**：WordSim-353（353 行）+ Google Analogy Dataset（19544 题 / 14 类），
+  指标可直接与论文对比；内置小评测集用于离线跑通和训练途中快速观察。
 - 训练全程有**时间预算保护**，硬上限 6 小时以内，超时自动优雅停止并保存。
 
 ---
@@ -27,7 +29,8 @@ Word2Vec-lab/
 ├── configs/          # tiny / full 两档配置
 ├── data/
 │   ├── samples/      # 内置离线语料与可视化词表（入库）
-│   ├── eval/         # 相似度 / 类比评测集（入库）
+│   ├── eval/         # 内置小评测集（入库）
+│   │   └── downloaded/  # 标准数据集缓存：WordSim-353 / Google Analogy（不入库）
 │   ├── raw/          # 下载的原始语料（不入库）
 │   └── processed/    # 预处理结果（不入库）
 ├── src/
@@ -38,7 +41,8 @@ Word2Vec-lab/
 │   ├── train.py       # ⑤ 模型训练
 │   ├── infer.py       # ⑥ 模型推理
 │   ├── visualize.py   # ⑦ 可视化
-│   ├── evaluate.py    #    定量评估
+│   ├── evaluate.py    #    定量评估（相似度 / 3CosAdd 类比）
+│   ├── eval_data.py   #    标准评测集下载、缓存与解析
 │   ├── vectors.py     #    词向量存取与运算
 │   ├── vocab.py       #    词表 / 负采样表
 │   └── demo_corpus.py #    离线语料生成器
@@ -146,7 +150,9 @@ $$J = -\log \sigma(u_o \cdot v_c) - \sum_{k=1}^{K} \log \sigma(-u_k \cdot v_c)$$
 
 CBOW：把上下文向量取平均得到 $v_{ctx}$，其余相同。代码里几个**实际训练才会踩到的坑**：
 
-- `Embedding(sparse=True)`：V=25 万、D=300 时稠密梯度每步要写 7500 万个 float（300 MB）；稀疏梯度只更新 batch 里出现的几千行。配套必须用 `SparseAdam`（AdamW 不支持稀疏梯度）。
+- `Embedding(sparse=True)`：本项目 text8 的 V=7.1 万、D=300，稠密梯度每步要写
+  2140 万个 float（86 MB）；稀疏梯度只更新 batch 里出现的几千行，快得多。
+  配套必须用 `SparseAdam`（AdamW 不支持稀疏梯度）。
 - 正样本与 K 个负样本拼在一起做一次 `BCEWithLogits`，等价于原式且数值更稳。
 - 损失按 `sum / batch_size` 聚合（对 1+K 项求和后按样本平均），与主流实现一致。
 - 梯度裁剪自己实现，因为 `torch.nn.utils.clip_grad_norm_` 对稀疏梯度不友好。
@@ -176,7 +182,7 @@ CBOW：把上下文向量取平均得到 $v_{ctx}$，其余相同。代码里几
 - 构建 unigram^0.75 采样表时把它们的词频清零（分不到任何槽位），并在建表后断言表里不含它们；
 - 采样时再显式过滤一次，这样即使以后换了别的采样表实现，约束也不会被悄悄破坏。
 
-**实现方式**是拒绝采样：冲突概率约 $K/V$（V=25 万、K=10 时约 4e-5），正常一轮就结束；
+**实现方式**是拒绝采样：冲突概率约 $K/V$（text8 的 V=7.1 万、K=10 时约 1.4e-4），正常一轮就结束；
 词表极小的极端情况有确定性兜底。为了不让每次采样都触发 GPU→CPU 同步，
 负采样放在**预取线程**里用 numpy 完成，与 GPU 计算重叠。
 
@@ -212,11 +218,57 @@ python -m src.infer --vectors runs/full/vectors.npz -c "arith king - man + woman
 
 交互模式里输入 `help` 看全部命令。输入拼错的词会自动给出拼写建议。
 
-定量评估 `src/evaluate.py`：词相似度 Spearman 相关 + 3CosAdd 类比准确率（按类别分组报告）。
+定量评估 `src/evaluate.py`：词相似度 Spearman 相关 + 3CosAdd 类比准确率。
 
 ```bash
-python -m src.evaluate --vectors runs/full/vectors.npz --out runs/full/eval.json
+# tiny：用内置小评测集（离线、秒级）
+python -m src.evaluate --vectors runs/tiny/vectors.npz \
+    --similarity data/eval/similarity_pairs.txt \
+    --analogy data/eval/analogy_questions.txt
+
+# full：用完整的公开标准数据集（首次自动下载并缓存）
+python -m src.evaluate --vectors runs/full/vectors.npz \
+    --similarity wordsim353 --analogy google-analogy \
+    --out runs/full/eval.json
 ```
+
+#### 评测集
+
+评测集参数既可以是 **文件路径**，也可以是 **注册名**。注册名会按需下载并缓存到
+`data/eval/downloaded/`，下载失败自动回退到内置小评测集（不会中断流程）：
+
+```bash
+python -m src.eval_data --list        # 列出所有可选数据集及缓存状态
+python -m src.eval_data --fetch       # 提前把全部数据集拉下来（推荐训练开始前跑）
+make evaldata                         # 同上
+```
+
+| 注册名 | 规模 | 说明 |
+|---|---|---|
+| `wordsim353` | 353 行 / 352 唯一词对 | WordSim-353 全量，**full 配置默认** |
+| `wordsim353-sim` | 203 对 | 相似性子集 |
+| `wordsim353-rel` | 252 对 | 相关性自集 |
+| `men` | 3000 对 | MEN |
+| `simlex999` | 999 对 | SimLex-999 |
+| `google-analogy` | 19544 题 / 14 类 | Google Analogy Dataset，**full 配置默认** |
+
+关于 WordSim-353 有一个容易让人以为解析写错了的事实：**它的文件有 353 行，但
+`(money, cash)` 出现了两次**（9.15 与 9.08），所以唯一词对是 352 个。代码保留全部行、
+另外报告唯一词对数，不做静默去重。报告里会明确打印这一点。
+
+类比评测按 Google 官方的 14 个类别分组，并汇总成论文里的两个大组：
+
+- **semantic**（语义，8869 题）：capital-common-countries / capital-world / currency / city-in-state / family
+- **syntactic**（句法，10675 题）：gram1 ~ gram9
+
+同时给出两个口径，避免误读：
+
+- `accuracy` = 答对 / **a、b、c 三词都在词表里的题数**（论文常用口径，可与文献对比）
+- `accuracy_total` = 答对 / 全部题（缺词的题算错，最严格）
+
+> 实现上不是逐题搜索，而是把所有题的 query 向量一次性算出来再分块做矩阵乘。
+> 逐题算的话 19544 题 × 7.1 万词表要十几分钟；分块 GEMM 让 BLAS 吃满，
+> text8 的规模下约 40 秒。分块大小由 `chunk_mb` 控制（默认 128 MB）。
 
 ### ⑦ 可视化 `src/visualize.py`
 
@@ -287,7 +339,15 @@ bash scripts/run_server.sh                       # 默认 configs/full.yaml
 CONFIG=configs/tiny.yaml bash scripts/run_server.sh   # 小规模先验一遍
 ```
 
-脚本会依次执行：GPU 体检 → 数据收集 → 预处理 → 样本自检 → 训练 → 评估，日志落在 `logs/`。
+脚本会依次执行：GPU 体检 → **下载评测集** → 数据收集 → 预处理 → 样本自检 → 训练 →
+用完整数据集评估，日志落在 `logs/`。
+
+评测集提前单独拉一次也很方便（失败会立刻暴露，而不是等训练跑完）：
+
+```bash
+make evaldata        # 或 python -m src.eval_data --fetch
+make datasets        # 查看缓存状态
+```
 
 **防止 SSH 断连中断训练**：
 
@@ -316,12 +376,27 @@ tail -f logs/run.out
 
 `configs/full.yaml` 的估算（text8，1700 万词，dim=300，5 epoch）：
 
+真实 text8 上实测的规模（`python -m src.dataset --config configs/full.yaml --show 5` 随时可复现）：
+
+| 指标 | 实测值 |
+|---|---|
+| 语料 token | 17,005,207 |
+| 词表（min_count=5） | 71,292（`<unk>` 占 1.68%） |
+| subsample=1e-4 后 | 9.67M token（保留 56.9%） |
+| 每 epoch 样本对 | 58.04M |
+| 模型参数 | 2 × 71292 × 300 ≈ 4280 万 |
+
 | 阶段 | 时间 | 说明 |
 |---|---|---|
-| 下载 | 2 分钟~30 分钟 | 取决于到下载源的网速，建议提前下好 |
-| 预处理 | 1~3 分钟 | 已优化：1700 万词两遍遍历约 1 分钟 |
-| 训练 | 5~20 分钟 | 受数据管道吞吐限制，5 个 epoch |
-| 评估 + 可视化 | 2~5 分钟 | |
+| 下载 text8 | 取决于网速 | 31 MB 压缩包；慢的话本地下好再 scp |
+| 下载评测集 | < 10 秒 | `make evaldata`，约 600 KB |
+| 预处理 | **约 45 秒** | 实测：1700 万词两遍流式遍历 |
+| 训练 | **约 6~15 分钟** | 5 个 epoch，受数据管道限制（约 86 万样本对/秒） |
+| 评估 | **约 1 分钟** | 实测 56 秒，主要是 19544 题类比的一次全词表搜索 |
+| 可视化 | 1~3 分钟 | t-SNE 在 500 词上 |
+
+训练途中的中途评估固定用**内置小评测集**（秒级、离线、epoch 间可比），
+完整的 WordSim-353 + Google Analogy 只在训练全部结束后算一次。
 
 配置里设了 `max_minutes: 330`（5.5 小时）作为兜底，任何情况下都会在 6 小时内结束并保存。
 真嫌慢的话，加大 `train.prefetch`（预取深度）能让 GPU 少等 CPU，但没法突破管道本身的吞吐上限。
@@ -365,8 +440,18 @@ git push -u origin main
 
 ### 5.2 已经确认不会上传的东西
 
-`.gitignore` 已排除：`data/raw/`、`data/processed/`、`runs/`、`*.pt`、`*.npy`、`*.npz`、`logs/`。
-**会**上传的是 `data/samples/` 与 `data/eval/`（几 KB 的离线语料和评测集），这样 clone 下来 `make local` 就能直接跑。
+`.gitignore` 已排除：`data/raw/`、`data/processed/`、`data/eval/downloaded/`、`runs/`、
+`*.pt`、`*.npy`、`*.npz`、`logs/`。
+**会**上传的是 `data/samples/` 与 `data/eval/*.txt`（几 KB 的离线语料和内置评测集），
+这样 clone 下来 `make local` 就能直接跑。
+
+标准评测集（WordSim-353 / Google Analogy，共约 600 KB）不入库，用
+`make evaldata` 重新下载即可；服务器无外网的话在本地下载后 scp 过去：
+
+```bash
+python -m src.eval_data --fetch          # 本地下载到 data/eval/downloaded/
+scp -r data/eval/downloaded 服务器:~/Word2Vec-lab/data/eval/
+```
 
 ### 5.3 服务器上拉取 / 更新
 
@@ -403,7 +488,13 @@ python tests/test_pipeline.py
 1. **loss 起点**应为 $(1+K)\ln 2$。K=5 → ≈ 4.16，K=10 → ≈ 7.62。如果不是这个数，说明目标函数或损失缩放写错了。
 2. **loss 应平滑下降**到 1.3~2.5 区间（取决于语料大小与 K）。
 3. `gnorm` 不应持续发散了再被你裁回来。
-4. 类比准确率：text8 + dim300 上 **≈ 0.5~0.65**；demo 语料上 ≈ 0.68。
+4. **Google Analogy 准确率**：text8 + skip-gram + dim300 上 **≈ 0.5~0.70**；
+   其中 semantic 组通常明显高于 syntactic 组。demo 语料上约 0.68（但那套题是围绕 demo 语料写的）。
+5. **WordSim-353 Spearman**：text8 + dim300 上 **≈ 0.6~0.75**。
+   demo 语料上只有 8% 的词对可评估，看覆盖率就知道这个数字不该拿来对比。
+
+看评估输出时先看**覆盖率**：`--similarity` 报的 coverage 和 `--analogy` 报的
+`n_evaluated / n_questions`。覆盖率太低说明语料/词表太小，指标本身没有对比意义。
 
 ### 「训练越久，类比越好但相似度越差」是正常的
 
@@ -435,7 +526,7 @@ Word2Vec 学出的向量空间是**各向异性**的：所有词都挤在一个�
 PyTorch 版本没带 sm_120 kernel。`pip install torch --index-url https://download.pytorch.org/whl/cu128`，且版本 ≥ 2.7。
 
 **Q: 报 `CUDA out of memory`**
-本项目的显存占用主要是参数的 4~5 倍（参数 + 梯度 + 优化器状态）。`dim=300`、词表 25 万时约 1.5 GB，5090 的 32 GB 绰绰有余。真爆了就把 `train.batch_size` 减半。
+本项目的显存占用主要是参数的 4~5 倍（参数 + 梯度 + 优化器状态）。`dim=300`、词表 7.1 万时约 0.7 GB，5090 的 32 GB 绰绰有余。真爆了就把 `train.batch_size` 减半。
 
 **Q: 报 `AdamW does not support sparse gradients`**
 `model.sparse=true` 必须配 `sparseadam` / `adagrad` / `sgd`。想用 AdamW 就把 `model.sparse` 设为 `false`（会慢一些、显存多占一些）。

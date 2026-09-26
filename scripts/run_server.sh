@@ -22,7 +22,7 @@ echo "=============================================================="
 
 # ---------- 1. 显卡体检（必须通过） ----------
 echo
-echo "[1/6] 检查 GPU 环境 ..."
+echo "[1/7] 检查 GPU 环境 ..."
 if ! "$PY" scripts/gpu_check.py; then
   cat <<'EOF'
 
@@ -36,35 +36,43 @@ EOF
   exit 1
 fi
 
-# ---------- 2. 语料 ----------
+# ---------- 2. 评测集（提前拉，免得训练完了才发现下不动） ----------
+echo
+echo "[2/7] 准备评测数据集 ..."
+"$PY" -m src.eval_data --fetch 2>&1 | tee "$LOG_DIR/evaldata.log"
+
+# ---------- 3. 语料 ----------
 SOURCE=$("$PY" -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['data']['source'])")
 RUN=$("$PY" -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['run_name'])")
+SIM=$("$PY" -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['eval']['similarity_file'])")
+ANA=$("$PY" -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['eval']['analogy_file'])")
 echo
-echo "[2/6] 收集语料 (source=$SOURCE) ..."
+echo "[3/7] 收集语料 (source=$SOURCE) ..."
 "$PY" -m src.collect --source "$SOURCE" 2>&1 | tee "$LOG_DIR/collect.log"
 
-# ---------- 3. 预处理 ----------
+# ---------- 4. 预处理 ----------
 echo
-echo "[3/6] 数据清理与预处理 ..."
+echo "[4/7] 数据清理与预处理 ..."
 "$PY" -m src.preprocess --config "$CONFIG" 2>&1 | tee "$LOG_DIR/preprocess.log"
 
-# ---------- 4. 样本自检 ----------
+# ---------- 5. 样本自检 ----------
 echo
-echo "[4/6] 训练样本自检 ..."
+echo "[5/7] 训练样本自检 ..."
 "$PY" -m src.dataset --config "$CONFIG" --show 8 2>&1 | tee "$LOG_DIR/samples.log"
 
-# ---------- 5. 训练 ----------
+# ---------- 6. 训练 ----------
 echo
-echo "[5/6] 开始训练（时间预算由配置里的 train.max_minutes 控制，超时自动保存）..."
+echo "[6/7] 开始训练（时间预算由配置里的 train.max_minutes 控制，超时自动保存）..."
 echo "      想断线不中断，请用 tmux："
 echo "        tmux new -s w2v  ->  再执行本脚本  ->  Ctrl+B D 脱离"
 "$PY" -m src.train --config "$CONFIG" --viz 2>&1 | tee "$LOG_DIR/train_$RUN.log"
 
-# ---------- 6. 评估 ----------
+# ---------- 7. 用完整数据集重新评估 ----------
 echo
-echo "[6/6] 独立评估 ..."
+echo "[7/7] 独立评估 (相似度=$SIM, 类比=$ANA) ..."
 "$PY" -m src.evaluate \
   --vectors "runs/$RUN/vectors.npz" \
+  --similarity "$SIM" --analogy "$ANA" \
   --out "runs/$RUN/eval.json" 2>&1 | tee "$LOG_DIR/eval_$RUN.log"
 
 cat <<EOF

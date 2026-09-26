@@ -20,6 +20,12 @@ SPECIAL_TOKENS = [UNK, PAD]
 UNK_IDX = 0
 PAD_IDX = 1
 
+# 特殊符号：不携带语义，任何情况下都不允许被抽成负样本。
+# 它们固定占住最小的下标 [0, NUM_SPECIALS)，所以「是否为特殊符号」可以直接用 id < NUM_SPECIALS 判断。
+SPECIAL_IDS = (UNK_IDX, PAD_IDX)
+SPECIAL_SET = frozenset(SPECIAL_IDS)
+NUM_SPECIALS = len(SPECIAL_TOKENS)
+
 
 class Vocab:
     def __init__(self, itos: Sequence[str], counts: Sequence[int]) -> None:
@@ -108,48 +114,147 @@ class Vocab:
 
     # ---------------- 负采样 ----------------
     def negative_sampling_table(self, table_size: Optional[int] = None) -> np.ndarray:
-        """构建 unigram^0.75 的别名表：返回 int32 数组，可直接随机下标取词 id。
+        """构建 unigram^0.75 的槽位表：返回 int32 数组，可直接用随机下标取词 id。
 
-        用「查表 + 随机下标」代替 np.random.choice(p=...)，
+        频次越高的词占据越多的槽位；用「查表 + 随机下标」代替 np.random.choice(p=...)，
         避免每次采样都做 O(V) 扫描，速度快几个数量级。
+
+        <unk> / <pad> 的词频被清零，因此不会占据任何槽位 —— 这是排除它们的第一道防线。
         """
         counts = self.counts.astype(np.float64).copy()
-        counts[UNK_IDX] = 0.0   # 特殊符号不参与负采样
-        counts[PAD_IDX] = 0.0
+        # ① 把 <unk> / <pad> 的词频清零 -> p^0.75 = 0 -> 分不到任何槽位
+        counts[: len(SPECIAL_TOKENS)] = 0.0
+
+        if len(self) <= len(SPECIAL_TOKENS):
+            raise ValueError("词表里没有任何实词，无法构建负采样表")
+        if not (counts > 0).any():
+            raise ValueError("所有实词词频都是 0，无法构建负采样表")
 
         if table_size is None:
             table_size = int(min(50_000_000, max(1_000_000, 20 * len(self))))
 
         probs = np.power(counts, 0.75)
-        total = probs.sum()
-        if total <= 0:
-            raise ValueError("语料为空或所有词频为 0，无法构建负采样表")
-        probs /= total
+        probs /= probs.sum()
 
-        slots = np.floor(probs * table_size).astype(np.int64)
-        diff = table_size - int(slots.sum())
+        real_slots = np.floor(probs * table_size).astype(np.int64)
+        # ② 把整除损失的余数补给最高频的实词；下标 2 起才是实词
+        diff = table_size - int(real_slots.sum())
         if diff != 0:
-            # 余下的槽位补给最高频的实词（下标 2 通常是频率最高的词）
-            slots[2:][int(np.argmax(counts[2:]))] += diff
-            # 若 diff 为负需回补，极少数情况下才发生
-            while slots.sum() > table_size:
-                slots[2:][int(np.argmax(slots[2:]))] -= 1
+            real_slots[2 + int(np.argmax(counts[2:]))] += diff
 
-        table = np.repeat(np.arange(len(slots), dtype=np.int32), slots)
+        table = np.repeat(np.arange(len(real_slots), dtype=np.int32), real_slots)
+
+        # ③ 兜底断言：表里绝不能出现 <unk> / <pad>
+        if np.isin(table, SPECIAL_IDS).any():
+            raise AssertionError("负采样表里出现了 <unk> / <pad>，请检查词表构建逻辑")
         return table
 
 
 class NegativeSampler:
-    """从负采样表里批量取负样本。"""
+    """从负采样表里批量取负样本。
+
+    两条硬约束：
+      1. 负样本不能是该样本的 **positive target**（也就是 label=1 的那个词）。
+         否则等于手把手教模型「真正的目标不是目标」，是典型的假负样本；
+      2. 负样本不能是 <unk> / <pad>。它们不携带语义，
+         被抽中只是白送噪声，还会让 <unk> 的向量被大量无意义梯度污染。
+
+    采样表本身已经排除了特殊符号，但 :meth:`sample_excluding` 仍会显式再过滤一遍，
+    这样即使以后换了别的采样表实现，这两条约束也不会被悄悄破坏。
+    """
 
     def __init__(self, vocab: Vocab, table_size: Optional[int] = None, seed: int = 0) -> None:
         self.table = vocab.negative_sampling_table(table_size)
         self.rng = np.random.default_rng(seed)
         self.vocab_size = len(vocab)
 
+        # 统计量：用来确认「排除正目标」这条规则真的生效了
+        self.n_sampled = 0        # 累计抽出的负样本个数
+        self.n_resampled = 0      # 其中因为撞上正目标 / 特殊符号而被重抽的个数
+
+        if np.isin(self.table, SPECIAL_IDS).any():
+            raise AssertionError("负采样表里出现了 <unk> / <pad>")
+
+    # ---------------- 基础采样 ----------------
     def sample(self, shape) -> np.ndarray:
         idx = self.rng.integers(0, len(self.table), size=shape, dtype=np.int64)
         return self.table[idx]
 
     def sample_array(self, n: int) -> np.ndarray:
         return self.sample((n,))
+
+    # ---------------- 带约束的采样 ----------------
+    def sample_excluding(self, shape, targets, extra=None, max_tries: int = 8) -> np.ndarray:
+        """采负样本，并保证每一行都不含「本行禁止出现的词」。
+
+        参数
+        ----
+        shape   : (B, K)，B 是 batch 大小，K 是每个正样本配的负样本数
+        targets : (B,) 每行的 positive target id（模型里做正例的那个词）
+        extra   : (B,) 或 (B, M)，可选。同属假负样本的额外禁用词
+                  （Skip-gram 传中心词，CBOW 传整条上下文），可为 None
+        max_tries : 拒绝采样轮数上限。词表正常时一轮就结束
+                    （冲突概率约 K/V，V=25 万时约 4e-5）
+
+        返回 (B, K) int32 数组。
+        """
+        shape = tuple(int(s) for s in shape)
+        b = shape[0]
+        # 统一用 int32，与采样表 dtype 保持一致。
+        # 否则 numpy 会在每次比较时把 int32 隐式升级成 int64 再拷贝一份，白白慢一倍。
+        targets = np.asarray(targets, dtype=np.int32).reshape(b)
+        if extra is not None:
+            extra = np.asarray(extra, dtype=np.int32)
+            if extra.ndim == 1:
+                extra = extra.reshape(b, 1)
+
+        neg = self.sample(shape)
+        forbidden = self._forbidden_mask(neg, targets, extra)
+
+        tries = 0
+        while forbidden.any() and tries < max_tries:
+            n_bad = int(forbidden.sum())
+            neg[forbidden] = self.sample_array(n_bad)
+            self.n_resampled += n_bad
+            forbidden = self._forbidden_mask(neg, targets, extra)
+            tries += 1
+
+        if forbidden.any():
+            # 词表极小时才可能走到这里：确定性地挑一个合法 id
+            self._force_valid(neg, forbidden, targets, extra)
+
+        self.n_sampled += neg.size
+        return neg
+
+    @staticmethod
+    def _forbidden_mask(neg: np.ndarray, targets: np.ndarray,
+                        extra: Optional[np.ndarray]) -> np.ndarray:
+        """标出哪些位置是非法的：等于正目标、是 <unk>/<pad>、或落在 extra 里。"""
+        # ① 等于本行的正目标
+        mask = neg == targets[:, None]
+        # ② 特殊符号：它们固定占住 [0, NUM_SPECIALS)，一次比较即可
+        mask |= neg < NUM_SPECIALS
+        # ③ extra 里逐个比较。按列循环而不是做 (B, K, M) 三维广播，
+        #    实测在 B=8192/K=10/M=10 时快 3 倍以上（少了一个大临时数组和一次归约）
+        if extra is not None:
+            for m in range(extra.shape[1]):
+                mask |= neg == extra[:, m:m + 1]
+        return mask
+
+    def _force_valid(self, neg: np.ndarray, forbidden: np.ndarray,
+                     targets: np.ndarray, extra: Optional[np.ndarray]) -> None:
+        rows, cols = np.nonzero(forbidden)
+        for r, c in zip(rows, cols):
+            banned = {int(targets[r])} | SPECIAL_SET
+            if extra is not None:
+                banned.update(int(x) for x in extra[r])
+            cand = 2
+            while cand < self.vocab_size and cand in banned:
+                cand += 1
+            if cand < self.vocab_size:
+                neg[r, c] = cand
+
+    # ---------------- 统计 ----------------
+    @property
+    def resample_rate(self) -> float:
+        return self.n_resampled / self.n_sampled if self.n_sampled else 0.0

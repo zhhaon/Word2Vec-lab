@@ -73,11 +73,40 @@ def _progress_hook(name: str):
     return hook
 
 
+def remote_size(url: str, timeout: float = 20.0) -> Optional[int]:
+    """用 HEAD 请求问出文件大小；服务器不支持 HEAD 时返回 None。"""
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            length = resp.headers.get("Content-Length")
+            return int(length) if length else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _expected_size(urls: List[str]) -> Optional[int]:
+    for url in urls:
+        size = remote_size(url)
+        if size:
+            return size
+    return None
+
+
 def download(urls: List[str], dest: Path, retries_per_url: int = 2) -> Path:
-    """依次尝试候选 URL 下载；全部失败则给出明确的手动下载指引。"""
+    """依次尝试候选 URL 下载；全部失败则给出明确的手动下载指引。
+
+    会校验文件大小：下载被中断（Ctrl+C、断网、SSH 掉线）留下的残缺文件
+    不会被当成已完成 —— 否则后面会拿着半个语料训练，还很难发现。
+    """
+    expected = _expected_size(urls)
+
     if dest.exists() and dest.stat().st_size > 0:
-        print(f"  已存在，跳过下载: {dest}")
-        return dest
+        local = dest.stat().st_size
+        if expected is None or local >= expected:
+            print(f"  已存在且完整，跳过下载: {dest}")
+            return dest
+        print(f"  发现不完整的文件（{human_int(local)}B / {human_int(expected)}B），重新下载")
+        dest.unlink()
     ensure_dir(dest.parent)
 
     for url in urls:
@@ -86,11 +115,16 @@ def download(urls: List[str], dest: Path, retries_per_url: int = 2) -> Path:
                 print(f"  尝试下载 ({attempt}/{retries_per_url}): {url}")
                 urllib.request.urlretrieve(url, dest, reporthook=_progress_hook(dest.name))
                 print()
-                if dest.stat().st_size == 0:
+                got = dest.stat().st_size
+                if got == 0:
                     raise IOError("下载文件为空")
+                if expected and got < expected:
+                    raise IOError(
+                        f"下载不完整: {human_int(got)}B < {human_int(expected)}B"
+                    )
                 return dest
             except Exception as exc:  # noqa: BLE001
-                print(f"  失败: {exc}")
+                print(f"  ！{exc}")
                 if dest.exists():
                     dest.unlink()
     raise RuntimeError(

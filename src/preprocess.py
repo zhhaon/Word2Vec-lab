@@ -111,12 +111,22 @@ def iter_sentence_token_lists(
             if len(line) <= chunk_bytes:
                 yield from _emit_pseudo(tokenize(line), pseudo_sent_tokens)
             else:
+                # 超长行（例如 text8 整篇就是一行）：
+                # 按空白边界切成若干片段再分词，然后用「游标 + 每片回收一次」的方式
+                # 划出伪句子。注意不能用 pending = pending[size:] 反复切片 ——
+                # 那是 O(n) 拷贝，片段里上百万个 token 会把这一步拖成几十秒。
                 pending: List[str] = []
+                start = 0
                 for piece in _split_raw_by_whitespace(line, chunk_bytes):
                     pending.extend(tokenize(piece))
-                    while len(pending) >= pseudo_sent_tokens:
-                        yield pending[:pseudo_sent_tokens]
-                        pending = pending[pseudo_sent_tokens:]
+                    while len(pending) - start >= pseudo_sent_tokens:
+                        yield pending[start:start + pseudo_sent_tokens]
+                        start += pseudo_sent_tokens
+                    if start:
+                        pending = pending[start:]
+                        start = 0
+                if start:
+                    pending = pending[start:]
                 yield from _emit_pseudo(pending, pseudo_sent_tokens)
 
 

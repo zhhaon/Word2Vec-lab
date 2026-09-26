@@ -65,19 +65,67 @@ def test_vocab() -> None:
               "词表存 / 读一致")
 
 
+def _make_vocab(n: int = 50) -> Vocab:
+    counter = Counter({f"w{i}": max(1, int(1000 / (i + 1))) for i in range(n)})
+    return Vocab.from_counter(counter, min_count=1)
+
+
 def test_negative_sampling() -> None:
     print("\n[3] 负采样")
-    counter = Counter({chr(97 + i) * 1: 0 for i in range(0)})
-    counter = Counter({f"w{i}": int(1000 / (i + 1)) for i in range(50)})
-    v = Vocab.from_counter(counter, min_count=1)
+    v = _make_vocab(50)
     sampler = NegativeSampler(v, table_size=200_000, seed=0)
     s = sampler.sample_array(20000)
     check(int(s.min()) >= 2, "特殊符号不会被采成负样本")
     check(int(s.max()) < len(v), "负样本下标在词表范围内")
+    check(not np.isin(s, [UNK_IDX, PAD_IDX]).any(),
+          "整张采样表里没有 <unk> / <pad>")
     # 高频词应当被采到更多次
+    counter = Counter({f"w{i}": max(1, int(1000 / (i + 1))) for i in range(50)})
     top = counter.most_common(1)[0][0]
     freq_top = float((s == v.stoi[top]).mean())
     check(freq_top > 0.02, f"高频词采样比例合理: {freq_top:.3f}")
+
+
+def test_negative_sampling_excludes_target() -> None:
+    print("\n[3b] 负采样排除正目标 / 特殊符号")
+    v = _make_vocab(50)
+    sampler = NegativeSampler(v, table_size=100_000, seed=1)
+    b, k = 512, 10
+
+    rng = np.random.default_rng(0)
+    targets = rng.integers(2, len(v), size=b)
+    neg = sampler.sample_excluding((b, k), targets=targets)
+
+    check(neg.shape == (b, k), f"输出形状正确: {neg.shape}")
+    # 逐行检查：本行的负样本里不能出现本行的正目标
+    hit_target = (neg == targets[:, None]).any(axis=1)
+    check(not hit_target.any(),
+          f"没有任何负样本等于本行的正目标（{b} 行全通过）")
+    check(not np.isin(neg, [UNK_IDX, PAD_IDX]).any(),
+          "没有任何负样本是 <unk> / <pad>")
+    check(int(neg.min()) >= 2 and int(neg.max()) < len(v), "负样本 id 合法")
+
+    # 统计量应当被记录（冲突概率约 K/V，正常语料上很小）
+    check(sampler.n_sampled == b * k, f"统计量正确: n_sampled={sampler.n_sampled}")
+    print(f"       冲突重抽率 {sampler.resample_rate * 100:.3f}%（V={len(v)}, K={k}）")
+
+    # extra：额外禁用一批词（Skip-gram 的中心词 / CBOW 的上下文）
+    extra = rng.integers(2, len(v), size=(b, 4))
+    neg2 = sampler.sample_excluding((b, k), targets=targets, extra=extra)
+    bad_target = (neg2 == targets[:, None]).any(axis=1)
+    bad_extra = (neg2[:, :, None] == extra[:, None, :]).any(axis=(1, 2))
+    check(not bad_target.any(), "带 extra 时仍不碰正目标")
+    check(not bad_extra.any(), "带 extra 时也不碰额外禁用的词")
+
+    # 小词表压力测试：K 接近词表规模，必须触发重抽 + 兜底路径且结果仍然正确
+    small = _make_vocab(10)
+    s2 = NegativeSampler(small, table_size=2_000, seed=2)
+    t2 = np.random.default_rng(1).integers(2, len(small), size=64)
+    n2 = s2.sample_excluding((64, 6), targets=t2)
+    check(not (n2 == t2[:, None]).any(), "小词表下依然不碰正目标")
+    check(not np.isin(n2, [UNK_IDX, PAD_IDX]).any(), "小词表下依然不碰特殊符号")
+    check(s2.n_resampled > 0, f"小词表下确实触发了重抽 ({s2.n_resampled} 次)")
+    print(f"       小词表(V=10, K=6) 重抽 {s2.n_resampled} 次，兜底逻辑已覆盖")
 
 
 def _make_stream(arch: str = "skipgram", subsample: float = 0.0) -> PairStream:
@@ -93,6 +141,31 @@ def _make_stream(arch: str = "skipgram", subsample: float = 0.0) -> PairStream:
     lens = np.array([len(i) for i in ids], dtype=np.int64)
     return PairStream(tokens, lens, vocab, window=5, arch=arch,
                       subsample=subsample, seed=1)
+
+
+def test_train_time_negatives() -> None:
+    """端到端模拟训练时的负采样：用真实样本对 + 真实约束，检查没有假负样本。"""
+    print("\n[3c] 训练时负采样（Skip-gram / CBOW 端到端）")
+    for arch in ("skipgram", "cbow"):
+        st = _make_stream(arch)
+        st.prepare(0)
+        sampler = NegativeSampler(st.vocab, table_size=100_000, seed=3)
+        checked = 0
+        for center, context in st.iter_batches(batch_size=512, epoch=0):
+            # 与 src/train.py 的 sample_negatives 完全一致的取法
+            if arch == "skipgram":
+                positive, extra = context, center
+            else:
+                positive, extra = center, context
+            neg = sampler.sample_excluding((len(center), 5), targets=positive, extra=extra)
+
+            if arch == "skipgram":
+                assert not (neg == context[:, None]).any(), "skip-gram 负样本撞上正目标"
+            else:
+                assert not (neg == center[:, None]).any(), "cbow 负样本撞上正目标"
+            assert not np.isin(neg, [UNK_IDX, PAD_IDX]).any(), "负样本含特殊符号"
+            checked += len(center)
+        check(checked > 0, f"{arch}: 检查了 {checked} 个样本的负采样，未出现假负样本")
 
 
 def test_pair_stream_skipgram() -> None:
@@ -221,6 +294,7 @@ def main() -> None:
     print(" Word2Vec-lab 自检（不需要 PyTorch）")
     print("=" * 66)
     for fn in (test_tokenizer, test_vocab, test_negative_sampling,
+               test_negative_sampling_excludes_target, test_train_time_negatives,
                test_pair_stream_skipgram, test_pair_stream_cbow,
                test_sentence_boundary, test_vectors_io,
                test_preprocess_roundtrip):

@@ -94,11 +94,15 @@ class Prefetcher:
 
     def _worker(self, batches) -> None:
         try:
-            for item in batches:
+            for epoch, center, context, negatives in batches:
                 if self._stop.is_set():
                     break
-                epoch, center, context = item
-                self.q.put((epoch, self._to_tensor(center), self._to_tensor(context)))
+                self.q.put((
+                    epoch,
+                    self._to_tensor(center),
+                    self._to_tensor(context),
+                    None if negatives is None else self._to_tensor(negatives),
+                ))
         except Exception as exc:  # noqa: BLE001
             self.q.put(exc)
         finally:
@@ -245,10 +249,27 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
     prefetch = int(t_cfg.get("prefetch", 8))
     eval_every = int(cfg.get("eval", {}).get("every_epochs", 0) or 0)
 
-    def batch_iter() -> Iterator[Tuple[int, np.ndarray, np.ndarray]]:
+    def sample_negatives(center_np: np.ndarray, context_np: np.ndarray) -> Optional[np.ndarray]:
+        """按「排除正目标」的规则采负样本（在预取线程里做，不阻塞 GPU）。
+
+        Skip-gram：正目标是上下文词，另外把中心词也禁掉
+                   （中心词与正目标是一对真共现，抽成负样本同样是假负样本）；
+        CBOW     ：正目标是中心词，另外把整条上下文都禁掉。
+        """
+        if n_neg <= 0:
+            return None
+        if arch == "skipgram":
+            positive, extra = context_np, center_np
+        else:
+            positive, extra = center_np, context_np
+        return neg_sampler.sample_excluding(
+            (len(center_np), n_neg), targets=positive, extra=extra
+        )
+
+    def batch_iter() -> Iterator[Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray]]]:
         for ep in range(start_epoch, epochs):
             for c, x in stream.iter_batches(batch_size=batch_size, epoch=ep):
-                yield ep, c, x
+                yield ep, c, x, sample_negatives(c, x)
 
     prefetcher = Prefetcher(batch_iter(), depth=prefetch, device=device)
     timer = Timer()
@@ -259,10 +280,13 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
     logger.info("-" * 74)
     logger.info("开始训练（max_minutes=%s，到点会自动停止并保存）",
                 max_minutes if max_minutes > 0 else "无限制")
+    logger.info("负采样约束: 排除本样本的正目标(%s)%s + 排除 <unk>/<pad>",
+                "上下文词" if arch == "skipgram" else "中心词",
+                " + 排除中心词" if arch == "skipgram" else " + 排除上下文词")
     logger.info("-" * 74)
 
     try:
-        for epoch, center, context in prefetcher:
+        for epoch, center, context, negatives in prefetcher:
             # 每个 epoch 交界处，按需做一次中途评估（看清指标随训练怎么变化）
             if epoch != last_epoch:
                 last_epoch = epoch
@@ -276,11 +300,6 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
                 g["lr"] = lr
 
             bs = center.size(0)
-            negatives = neg_sampler.sample_array(bs * n_neg) if n_neg > 0 else None
-            if negatives is not None:
-                negatives = torch.from_numpy(negatives.reshape(bs, n_neg)).to(
-                    device, non_blocking=True)
-
             optimizer.zero_grad(set_to_none=True)
             logits, labels = model(center, context, negatives)
             loss = neg_loss(logits, labels)
@@ -322,7 +341,7 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
 
             # 时间预算保护
             if deadline and time.time() > deadline:
-                logger.warning("已达到时间预算 %.0f 分钟，优雅停止并保存。", max_minutes)
+                logger.warning("已达到时间预算 %g 分钟，优雅停止并保存。", max_minutes)
                 stopped_early = True
                 break
 
@@ -340,6 +359,10 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
                      global_step, cfg)
     npz_path, txt_path = export_vectors(model, vocab, out_dir, m_cfg.get("export", "input"))
     logger.info("词向量已导出: %s / %s", npz_path.name, txt_path.name)
+    if neg_sampler.n_sampled:
+        logger.info("负采样统计: 共 %s 个，其中与正目标/特殊符号冲突而被重抽 %s 个（%.4f%%）",
+                    human_int(neg_sampler.n_sampled), human_int(neg_sampler.n_resampled),
+                    100 * neg_sampler.resample_rate)
     logger.info("总用时 %s%s", format_hms(timer.elapsed),
                 "（因时间预算提前停止）" if stopped_early else "")
 

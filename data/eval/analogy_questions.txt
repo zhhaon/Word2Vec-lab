@@ -1,0 +1,60 @@
+# 类比评估集（Google Analogy 风格子集）
+# 格式: a b c d   表示 a 之于 b，相当于 c 之于 d
+# 预测时计算 vec(b) - vec(a) + vec(c)，取最近邻（排除 a/b/c）
+# 以 # 开头的行为注释
+#
+# ---- 性别 (gender) ----
+king queen man woman
+king queen boy girl
+king queen father mother
+king queen son daughter
+king queen brother sister
+king queen uncle aunt
+king queen prince princess
+king queen husband wife
+king queen actor actress
+king queen grandfather grandmother
+man woman waiter waitress
+#
+# ---- 首都 / 国家 (capital-country) ----
+paris france berlin germany
+paris france rome italy
+paris france madrid spain
+paris france tokyo japan
+paris france moscow russia
+paris france beijing china
+paris france london england
+paris france cairo egypt
+paris france athens greece
+paris france lisbon portugal
+#
+# ---- 语言 (country-language) ----
+france french germany german
+france french italy italian
+france french spain spanish
+france french japan japanese
+france french russia russian
+france french china chinese
+france french egypt arabic
+france french greece greek
+#
+# ---- 幼崽 (animal-young) ----
+dog puppy cat kitten
+#
+# ---- 比较级 / 最高级 (comparative) ----
+big bigger small smaller
+tall taller short shorter
+old older new newer
+long longer short shorter
+fast faster slow slower
+warm warmer cold colder
+easy easier hard harder
+close closer open opener
+#
+# ---- 反义 (opposite) ----
+good bad hot cold
+light dark fast slow
+begin end open close
+#
+# ---- 复数 (plural) ----
+# （demo 语料较小，复数形态覆盖有限，保留供正式语料使用）

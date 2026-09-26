@@ -1,0 +1,127 @@
+# 可视化用的可解释词表
+# 格式: word [category]   —— 有 category 时会按类别上色，直观展示「语义聚类」
+# 用法: python -m src.visualize --vectors runs/tiny/vectors.npz --words-file data/samples/demo_words.txt
+
+king royal
+queen royal
+prince royal
+princess royal
+emperor royal
+empress royal
+
+man family
+woman family
+boy family
+girl family
+father family
+mother family
+son family
+daughter family
+brother family
+sister family
+uncle family
+aunt family
+husband family
+wife family
+
+france country
+germany country
+italy country
+spain country
+japan country
+russia country
+china country
+england country
+egypt country
+greece country
+
+paris capital
+berlin capital
+rome capital
+madrid capital
+tokyo capital
+moscow capital
+beijing capital
+london capital
+cairo capital
+athens capital
+
+french language
+german language
+italian language
+spanish language
+japanese language
+russian language
+chinese language
+arabic language
+
+dog animal
+cat animal
+horse animal
+cow animal
+lion animal
+tiger animal
+wolf animal
+sheep animal
+rabbit animal
+mouse animal
+eagle animal
+whale animal
+
+red color
+blue color
+green color
+black color
+white color
+yellow color
+purple color
+
+apple food
+banana food
+bread food
+cheese food
+rice food
+fish food
+coffee drink
+water drink
+
+computer tech
+program tech
+code tech
+compiler tech
+model tech
+data tech
+server tech
+algorithm tech
+network tech
+memory tech
+
+winter season
+summer season
+spring season
+autumn season
+
+train vehicle
+car vehicle
+airplane vehicle
+ship vehicle
+bicycle vehicle
+
+teacher job
+doctor job
+engineer job
+lawyer job
+farmer job
+musician job
+painter job
+writer job
+pilot job
+
+big size
+bigger size
+small size
+smaller size
+tall size
+short size
+long size
+large size

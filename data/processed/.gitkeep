@@ -1,0 +1,2 @@
+# 预处理产物（tokens.npy / sent_lengths.npy / vocab.json / meta.json）。
+# 内容不入库，用 `python -m src.preprocess --config <配置>` 重新生成。

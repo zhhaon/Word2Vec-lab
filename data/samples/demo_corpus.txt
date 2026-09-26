@@ -1,0 +1,134 @@
+The king ruled the kingdom with wisdom and the queen ruled beside him.
+The queen advised the king on matters of state every morning.
+A prince is the son of a king and a princess is the daughter of a king.
+The man walked into the room and the woman followed him quietly.
+The boy played in the garden while the girl read a book under the tree.
+My uncle visited my aunt in the city last summer.
+His brother and his sister both study at the same university.
+The father taught his son how to ride a bicycle.
+The mother cooked dinner while her daughter set the table.
+Paris is the capital of France and the French speak French.
+Berlin is the capital of Germany and the Germans speak German.
+Rome is the capital of Italy and the Italians speak Italian.
+Madrid is the capital of Spain and the Spanish speak Spanish.
+Tokyo is the capital of Japan and the Japanese speak Japanese.
+Moscow is the capital of Russia and the Russians speak Russian.
+Beijing is the capital of China and the Chinese speak Chinese.
+London is the capital of England and the English speak English.
+Cairo is the capital of Egypt and the Egyptians speak Arabic.
+Athens is the capital of Greece and the Greeks speak Greek.
+Lisbon is the capital of Portugal and the Portuguese speak Portuguese.
+The dog barked at the cat and the cat ran across the yard.
+A puppy is a young dog and a kitten is a young cat.
+The horse galloped over the field while the cow grazed nearby.
+The lion is a wild animal that hunts in the savanna.
+The tiger is a large wild cat with orange fur and black stripes.
+An elephant is a very large animal with a long trunk.
+The eagle flew high above the mountain and the sparrow stayed in the tree.
+A wolf lives in a pack and a sheep lives in a flock.
+The rabbit hopped through the grass and the mouse hid in a hole.
+Whales live in the ocean and eagles fly in the sky.
+The red rose grew beside the yellow sunflower in the garden.
+Blue is the color of the sky and green is the color of the grass.
+She wore a black coat and a white scarf in winter.
+The orange sunset faded into a purple evening sky.
+Silver and gold are both precious metals used in jewelry.
+The apple is red and the banana is yellow and the grape is purple.
+He ate bread with cheese and drank a cup of coffee.
+The chef prepared a soup with carrots and potatoes and onions.
+Fresh fish and rice make a simple and healthy meal.
+Sugar makes the cake sweet and lemon makes it sour.
+The computer runs the program that processes the data.
+A programmer writes code and a compiler translates the code.
+The model learned the pattern from a large amount of text data.
+The neural network has many layers and millions of parameters.
+We trained the model on a graphics card for several hours.
+The algorithm computes the gradient and updates the weights.
+Machine learning is a branch of artificial intelligence.
+Python is a popular programming language for data science.
+The server stores the model checkpoint on the disk.
+Memory and storage are both measured in bytes.
+The winter was cold and the summer was hot and dry.
+It rained heavily yesterday and the sky is cloudy today.
+The wind blew strongly and the storm arrived at night.
+Snow covered the mountain and ice covered the lake.
+Spring brings warm weather and flowers bloom again.
+One plus one equals two and two plus two equals four.
+Three times four is twelve and ten divided by two is five.
+The first day was easy and the second day was harder.
+The number seven is a prime number and eight is not.
+He counted to twenty and then started again from zero.
+A kilometer is a thousand meters and a meter is a hundred centimeters.
+The train arrived at the station ten minutes late.
+She drove the car to the office and parked near the entrance.
+The airplane landed safely and the passengers left the plane.
+The ship crossed the ocean in seven days.
+The bicycle is slower than the car but faster than walking.
+A teacher explains the lesson and a student asks a question.
+The doctor examined the patient and wrote a prescription.
+The engineer designed the bridge and the workers built it.
+The lawyer read the contract carefully before signing.
+The farmer planted wheat in the field in early spring.
+The musician played the piano and the singer sang a song.
+The painter mixed blue and yellow to make green paint.
+The writer finished the novel and sent it to the publisher.
+The soldier guarded the gate through the long night.
+The pilot checked the instruments before takeoff.
+The big house on the hill is larger than the small cottage by the river.
+An elephant is bigger than a mouse and a mouse is smaller than a cat.
+This road is longer than that path but shorter than the highway.
+Gold is more expensive than silver and silver is more expensive than iron.
+The fastest animal runs quicker than the strongest animal can swim.
+Learning a language is easier when you practice every day.
+Reading books improves your vocabulary more than watching television.
+He is taller than his brother but shorter than his father.
+Today is warmer than yesterday and colder than tomorrow.
+The old bridge is older than the new tunnel.
+Good and bad are opposites just as hot and cold are opposites.
+Light and dark are opposites just as fast and slow are opposites.
+Begin and end are opposites just as open and close are opposites.
+A king is a man who rules and a queen is a woman who rules.
+A father is a man and a mother is a woman.
+A boy grows into a man and a girl grows into a woman.
+A husband is a man and a wife is a woman.
+An actor performs in a film and an actress performs in a film too.
+The waiter served the table and the waitress served the next one.
+The prince became a king and the princess became a queen.
+The emperor ruled a large empire and the empress ruled with him.
+The company hired a manager and an assistant for the new team.
+My grandfather told stories and my grandmother baked bread.
+The cat slept on the sofa while the dog slept on the floor.
+Children played football in the park on Sunday morning.
+The music was loud and the room was full of people.
+She wrote a letter and posted it the following day.
+The library closes at eight and the cafe closes at ten.
+Coffee is a drink and bread is a food.
+Water is a liquid and ice is a solid and steam is a gas.
+The sun rises in the east and sets in the west.
+The moon orbits the earth and the earth orbits the sun.
+Gravity pulls objects toward the center of the earth.
+Photosynthesis lets plants convert light into energy.
+The heart pumps blood through the body every second.
+Doctors say that exercise keeps the body healthy.
+Sleep helps the brain store what you learned today.
+The market sells fruit and vegetables every Saturday morning.
+He bought a shirt and a pair of shoes at the shop.
+The price of the ticket was higher than we expected.
+She saved money for a year and then bought a laptop.
+The bank opened a new account for the young student.
+The company released a new product and the customers liked it.
+The software crashed because of a small error in the code.
+He fixed the bug and the program ran correctly again.
+The test passed after the engineer updated the function.
+Our model reached a better score than the baseline model.
+The loss decreased steadily as the training continued.
+A larger batch uses more memory but runs faster on the gpu.
+Word vectors place similar words close to each other in space.
+The word king is closer to queen than to banana in the vector space.
+Cosine similarity measures the angle between two vectors.
+The evaluation computes accuracy on a set of analogy questions.
+Students learn faster when they see a clear example.
+The professor explained the algorithm on the whiteboard.
+The experiment produced a result that matched the theory.
+She presented her research at the conference in the summer.
+The paper described a simple method with strong results.

@@ -1,0 +1,34 @@
+# ============================================================
+# Word2Vec-lab 依赖
+#
+# ⚠️ 注意：RTX 5090 是 Blackwell 架构（compute capability sm_120），
+#    必须使用 PyTorch >= 2.7 + CUDA 12.8 的官方 wheel，
+#    否则会报 "no kernel image is available for execution"。
+#
+# 服务器上请【不要】直接 `pip install -r requirements.txt` 装 torch，
+# 先执行（详见 README「服务器部署」章节）：
+#     pip install torch --index-url https://download.pytorch.org/whl/cu128
+# 再执行：
+#     pip install -r requirements.txt
+# ============================================================
+
+# ---- 核心 ----
+numpy>=1.24,<2.0
+scipy>=1.10
+torch>=2.7.0          # sm_120（RTX 50 系）最低要求
+pyyaml>=6.0
+tqdm>=4.65
+
+# ---- 训练监控 ----
+tensorboard>=2.13
+
+# ---- 评估与可视化 ----
+scikit-learn>=1.3
+matplotlib>=3.7
+pandas>=2.0
+
+# ---- 可选：中文分词（处理中文语料时打开）----
+jieba>=0.42
+
+# ---- 可选：更漂亮的降维可视化（安装较重，按需）----
+# umap-learn>=0.5

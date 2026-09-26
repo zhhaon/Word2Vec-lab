@@ -1,0 +1,40 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.python-version
+
+# ---------- 数据（体积大，不入库；用 `make data` 重新下载） ----------
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# ---------- 训练产物 ----------
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.bin
+*.vec
+*.kv
+
+# ---------- 日志 / 缓存 ----------
+logs/
+*.log
+tensorboard/
+events.out.tfevents.*
+.ipynb_checkpoints/
+.cache/
+
+# ---------- 编辑器 / 系统 ----------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

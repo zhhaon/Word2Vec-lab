@@ -1,0 +1,2 @@
+# 原始语料放在这里（data/raw/<source>/raw.txt）。
+# 内容不入库，用 `python -m src.collect --source <name>` 重新下载。

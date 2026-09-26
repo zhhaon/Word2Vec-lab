@@ -1,0 +1,57 @@
+# ============================================================
+# full：正式训练配置（在服务器 RTX 5090 上跑）
+#
+# 预算估算（text8，约 1700 万词，skip-gram）：
+#   每 epoch 正样本对 ≈ 1.7e7 × 2 × 窗口均值(≈3) ≈ 1.0e8 对
+#   5090 上 batch=8192 大约 20~35 ms/step → 单 epoch ≈ 5~8 分钟
+#   5 个 epoch ≈ 30~45 分钟  ✅ 远低于 6 小时上限
+#   max_minutes: 330 为兜底保护，超时会自动优雅停止并保存
+# ============================================================
+run_name: full
+seed: 42
+
+data:
+  source: text8             # demo | text8 | wikitext2 | local
+  lang: en
+  raw_dir: data/raw
+  processed_dir: data/processed
+  max_tokens: null          # 用完整语料
+  min_count: 5
+  max_vocab: null
+
+model:
+  arch: skipgram
+  dim: 300                  # 原论文常用 300 维
+  window: 5
+  negative: 10              # 大规模语料推荐 5~15
+  subsample: 1.0e-4
+  sparse: true
+  export: input             # 导出哪套向量：input | sum
+
+train:
+  epochs: 5
+  batch_size: 8192
+  lr: 0.0025                # SparseAdam 属 Adam 家族，lr 比原论文的 SGD(0.025) 小一档
+  min_lr: 0.0001
+  max_grad_norm: 5.0
+  optimizer: sparseadam
+  device: cuda              # 需要导师开卡；代码会做可用性检查并提示
+  amp: false
+  prefetch: 12              # 后台线程预取的 batch 数
+  log_every: 500
+  ckpt_every_steps: 20000
+  max_minutes: 330          # 5.5 小时硬保护（< 6 小时要求）
+  out_dir: runs
+
+eval:
+  every_epochs: 2            # 每隔 2 个 epoch 做一次中途评估（5 epoch 时会在 2、4 处看指标）
+  topk: 10
+  similarity_file: data/eval/similarity_pairs.txt
+  analogy_file: data/eval/analogy_questions.txt
+
+viz:
+  words_file: null
+  top_words: 500
+  methods: [pca, tsne]
+  tsne_perplexity: 30
+  out_dir: null

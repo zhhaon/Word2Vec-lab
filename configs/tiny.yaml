@@ -1,0 +1,61 @@
+# ============================================================
+# tiny：小规模配置
+# 用途：本地 CPU 也能在几分钟内跑通「全流程」，用于调试与教学演示
+# 语料：内置 demo 语料（无需联网）
+# ============================================================
+run_name: tiny
+seed: 42
+
+data:
+  source: demo              # demo | text8 | wikitext2 | local
+  lang: en                  # en | zh（zh 需要 jieba）
+  raw_dir: data/raw
+  processed_dir: data/processed
+  max_tokens: 200000        # 截断到 20 万词，保证本地秒级处理
+  min_count: 3              # 词频低于此值的词映射为 <unk>
+  max_vocab: null           # 词表上限，null 表示不限
+
+model:
+  arch: skipgram            # skipgram | cbow
+  dim: 100                  # 词向量维度
+  window: 5                 # 最大窗口；实际窗口每步在 [1, window] 随机取（论文做法）
+  negative: 5               # 每个正样本配的负样本数
+  # 高频词下采样阈值 t。注意：t 必须随语料规模缩放！
+  #   t=1e-4 是 1e8 词级语料的经验值；用在几万词的小语料上会把
+  #   "the/of" 这类词砍到只剩 4%，语料直接损失 3/4。
+  #   小语料要么关闭（0），要么放大到 1e-2 量级。直接设 0 最省事。
+  subsample: 1.0e-2
+  sparse: true              # 稀疏梯度，省显存、提速
+  export: input             # 导出哪套向量：input | sum
+
+train:
+  # 经验值：8 epoch 类比 ≈0.48 / 相似度 ≈0.27；12 epoch 类比 ≈0.68 / 相似度 ≈0.20。
+  # 「训练越久类比越好、相似度越差」是 Word2Vec 的常见现象（向量空间各向异性），
+  # 不是 bug，正式训练请以 text8 上的指标为准。
+  epochs: 12
+  batch_size: 1024
+  lr: 0.005                 # SparseAdam 是 Adam 家族，lr 要比 SGD 小一个量级
+  min_lr: 0.0005
+  max_grad_norm: 5.0
+  optimizer: sparseadam     # sparseadam（配 sparse=true）| adagrad | sgd | adamw
+  device: auto              # auto | cuda | cpu
+  amp: false                # 稀疏梯度 + AMP 易出问题，默认关闭
+  prefetch: 8               # 后台线程预取的 batch 数
+  log_every: 200            # 每 N 步打印一次
+  ckpt_every_steps: 5000    # 每 N 步存一次 checkpoint
+  max_minutes: 30           # 时间预算（分钟），超时优雅停止
+  out_dir: runs
+
+eval:
+  every_epochs: 4           # 每 N 个 epoch 评估一次
+  topk: 10
+  similarity_file: data/eval/similarity_pairs.txt
+  analogy_file: data/eval/analogy_questions.txt
+
+viz:
+  # demo 语料用带类别的词表，画出来会按语义簇上色，效果直观
+  words_file: data/samples/demo_words.txt
+  top_words: 150
+  methods: [pca, tsne]      # pca | tsne | umap
+  tsne_perplexity: 20
+  out_dir: null             # null = runs/<run_name>/viz

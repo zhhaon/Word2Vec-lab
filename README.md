@@ -5,7 +5,8 @@
 - 模型部分**不调用任何现成词向量库**，Skip-gram / CBOW + Negative Sampling 全部手写（约 150 行 PyTorch），每一行都能对应到论文公式。
 - 两档配置：`tiny`（1 分钟跑完，本地 CPU 即可）与 `full`（text8 语料 + RTX 5090，约 10~25 分钟）。
 - 正式评估用**完整的公开标准数据集**：WordSim-353（353 行）+ Google Analogy Dataset（19544 题 / 14 类），
-  指标可直接与论文对比；内置小评测集用于离线跑通和训练途中快速观察。
+  指标可直接与论文对比；**中途评估用的是同一套集**，所以 epoch 之间的数字可比。
+- 内置**早停**：按监控指标自动停，并保留最优 epoch 的权重与词向量。
 - 训练全程有**时间预算保护**，硬上限 6 小时以内，超时自动优雅停止并保存。
 
 ---
@@ -43,6 +44,7 @@ Word2Vec-lab/
 │   ├── visualize.py   # ⑦ 可视化
 │   ├── evaluate.py    #    定量评估（相似度 / 3CosAdd 类比）
 │   ├── eval_data.py   #    标准评测集下载、缓存与解析
+│   ├── early_stop.py  #    早停判定（不依赖 PyTorch，可单独测试）
 │   ├── vectors.py     #    词向量存取与运算
 │   ├── vocab.py       #    词表 / 负采样表
 │   └── demo_corpus.py #    离线语料生成器
@@ -79,8 +81,11 @@ python tests/test_pipeline.py   # 35 项自检，不需要 PyTorch
 
 ```
 runs/tiny/
-├── vectors.npz / vectors.txt   # 训练出来的词向量
-├── eval.json                   # 相似度 / 类比指标
+├── vectors.npz / vectors.txt   # 词向量（早停开启时 = 最优 epoch 的那份）
+├── best_vectors.npz / .txt     # 最优 epoch 的向量
+├── best.pt / best_meta.json    # 最优权重 + 它对应哪个 epoch、指标多少
+├── eval.json                   # 最终评估（相似度 / 类比）
+├── early_stopping.json         # 每个 epoch 的指标曲线 + 是否因早停而停
 ├── metrics.csv                 # 逐步 loss / lr / 吞吐
 ├── last.pt                     # 检查点（可续训）
 ├── train.log
@@ -90,12 +95,14 @@ runs/tiny/
     └── projector/              # 可拖进 TensorBoard Projector
 ```
 
-预期指标（demo 语料，只用于验证流程是否正常）：
+预期指标（demo 语料，只用于验证流程是否正常；配置是每 2 个 epoch 评估一次）：
 
-| 指标 | 12 epoch | 说明 |
+| 指标 | 典型值 | 说明 |
 |---|---|---|
-| 类比准确率 | ≈ 0.68 | `king:queen :: man:woman` 这类 |
-| 相似度 Spearman | ≈ 0.20 | 偏低是 Word2Vec 各向异性的正常现象，见 [第 6 节](#6-结果解读与调参) |
+| 类比准确率 | ≈ 0.68~0.78 | `king:queen :: man:woman` 这类 |
+| 相似度 Spearman | ≈ 0.28~0.33 | 偏低是 Word2Vec 各向异性的正常现象，见 [第 6 节](#6-结果解读与调参) |
+
+这个数据集上 `mean`（两者平均）大约在 epoch 13~17 见顶，早停会据此决定何时收工。
 
 ---
 
@@ -205,7 +212,53 @@ python -m src.train --config configs/full.yaml --set train.lr=0.001 --set model.
 - 线性学习率衰减（原论文做法）；
 - TensorBoard + `metrics.csv` 双路日志；
 - 定期保存检查点，支持断点续训；
+- **完整评估 + 早停**（见下）；
 - **时间预算保护** `train.max_minutes`：到点自动停止并保存，保证不超 6 小时。
+
+#### 中途评估与早停
+
+每到 `eval.every_epochs` 个 epoch 结束，就用**完整的评测集**评估一次当前模型：
+
+```
+[epoch 5 评估] 相似度 rho=0.6421（覆盖 99%）  |  类比 acc=0.4532（18104/19544 题）
+            语义=0.5102  句法=0.4021
+            监控 analogy_accuracy = 0.4532   最优: 最优 epoch 5（0.4532）   未提升 0/3
+            指标提升，已保存最优权重 -> runs/full/best.pt
+```
+
+早停规则（`early_stopping` 段配置，指标一律「越大越好」）：
+
+| 配置项 | 含义 |
+|---|---|
+| `monitor` | `analogy_accuracy`（默认）/ `similarity_spearman` / `mean` |
+| `patience` | 连续多少次评估没超过最优值就停 |
+| `min_delta` | 提升幅度小于它不算提升（full 的 19544 题下 0.002 ≈ 39 题） |
+| `min_epochs` | 至少训练几个 epoch 才允许停 |
+| `export_best` | 用最优 epoch 的权重覆盖 `vectors.*`（默认 true） |
+
+两条容易踩的细节，实现里都处理了：
+
+- **指标算不出来时（`nan`）不消耗耐心**。语料太小时所有题都可能因缺词而无法评估，
+  这时如果算作「未提升」，会在完全没信息的情况下把训练停掉；
+- **`test_pipeline.py` 覆盖了早停逻辑**（提升重置耐心、`min_delta` 门槛、`min_epochs`
+  保护、`nan` 不污染计数），共 25 项断言。
+
+`monitor` 怎么选：`analogy_accuracy` 是 Word2Vec 最标准的对比指标，粒度也够细；
+语料很小（比如内置集只有 41 题）时它一格就是 0.024，抖动大，这时用 `mean` 更稳。
+
+产物（早停开启时）：
+
+```
+runs/full/
+├── vectors.npz / .txt        # export_best=true 时 = 最优 epoch 的向量
+├── best_vectors.npz / .txt   # 最优 epoch 的向量（单独留一份）
+├── best.pt                   # 最优 epoch 的权重
+├── best_meta.json            # 最优是哪个 epoch、指标多少
+├── last.pt                   # 最后一个 epoch 的状态（续训用）
+├── early_stopping.json       # 完整的指标曲线 + 是否因早停而停
+├── eval_epoch003.json ...    # 每次中途评估的完整结果
+└── eval.json                 # 最终评估结果
+```
 
 ### ⑥ 模型推理 `src/infer.py`
 
@@ -391,12 +444,21 @@ tail -f logs/run.out
 | 下载 text8 | 取决于网速 | 31 MB 压缩包；慢的话本地下好再 scp |
 | 下载评测集 | < 10 秒 | `make evaldata`，约 600 KB |
 | 预处理 | **约 45 秒** | 实测：1700 万词两遍流式遍历 |
-| 训练 | **约 6~15 分钟** | 5 个 epoch，受数据管道限制（约 86 万样本对/秒） |
-| 评估 | **约 1 分钟** | 实测 56 秒，主要是 19544 题类比的一次全词表搜索 |
-| 可视化 | 1~3 分钟 | t-SNE 在 500 词上 |
+| 训练 | **9~17 分钟** | 单 epoch ≈ 70 秒（数据管道上限），跑满 8 个 epoch ≈ 9 分钟 |
+| 中途评估 | **约 1 分钟 / 次** | 每 epoch 一次（实测 56 秒），8 次约 8 分钟；**早停通常会砍掉几次** |
+| 最终评估 + 可视化 | 2~4 分钟 | |
 
-训练途中的中途评估固定用**内置小评测集**（秒级、离线、epoch 间可比），
-完整的 WordSim-353 + Google Analogy 只在训练全部结束后算一次。
+早停开启的情况下，实际训练时长通常比上表更短——这正是它的作用。
+但注意评估是**同步**做的（不占 GPU，占 CPU 单核），所以每个 epoch 的总开销
+是「训练 + 1 分钟评估」。真嫌评估慢可以把 `eval.every_epochs` 调成 2。
+
+中途评估与最终评估用的是**同一套**评测集（都由配置里的 `eval.similarity_file` /
+`eval.analogy_file` 决定），所以 full 跑起来每个 epoch 都会过一次完整的
+WordSim-353 + Google Analogy。这不只是为了好看指标——**只有同一套题，epoch 之间的
+数字才可比，早停才有依据**。
+
+单次评估约 1 分钟，8 个 epoch 全跑满的评估开销约 8 分钟，相对训练本身（约 9 分钟）
+是可以接受的；反过来它换来的是「哪一轮最好」这个信息，以及早停省下的时间。
 
 配置里设了 `max_minutes: 330`（5.5 小时）作为兜底，任何情况下都会在 6 小时内结束并保存。
 真嫌慢的话，加大 `train.prefetch`（预取深度）能让 GPU 少等 CPU，但没法突破管道本身的吞吐上限。
@@ -517,6 +579,9 @@ Word2Vec 学出的向量空间是**各向异性**的：所有词都挤在一个�
 | `train.lr` | SparseAdam 用 2.5e-3~5e-3 | Adam 家族比原始 SGD 的 0.025 小一个量级 |
 | `train.optimizer` | sparseadam | 想复现原论文可换 `sgd` + `lr=0.025` |
 | `train.batch_size` | 8192 | 只影响吞吐，不太影响效果 |
+| `early_stopping.monitor` | `analogy_accuracy` | 语料小、题目少时改用 `mean` 更稳 |
+| `early_stopping.patience` | 3 | 越大越保守；配合 `eval.every_epochs` 一起看 |
+| `eval.every_epochs` | 1~2 | 越小早停越灵敏，但评估开销越高 |
 
 ---
 

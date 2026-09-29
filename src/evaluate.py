@@ -204,24 +204,30 @@ def eval_analogy(emb: EmbeddingMatrix, questions, topk: int = 1, logger=None,
     })
 
     # ---------- 按类别 / 语义-句法分组 ----------
+    # Google Analogy 带 ": 分组名" 段头；内置小评测集没有，只能按已知词表推断。
+    has_official_cats = any(len(q) > 4 and q[4] for q in vq)
     cats = [q[4] if len(q) > 4 and q[4] else _guess_category(q[0], q[1], q[2], q[3])
             for q in vq]
-    by_cat: Dict[str, np.ndarray] = {}
+    by_cat: Dict[str, List[bool]] = {}
     for cat, ok in zip(cats, correct):
         by_cat.setdefault(cat, []).append(bool(ok))
     result["by_category"] = {
         cat: {"n": len(v), "acc": float(np.mean(v)), "correct": int(np.sum(v))}
         for cat, v in sorted(by_cat.items())
     }
+    result["categories_official"] = has_official_cats
 
-    groups: Dict[str, List[bool]] = {"semantic": [], "syntactic": []}
-    for cat, v in by_cat.items():
-        key = "semantic" if cat in eval_data.SEMANTIC_GROUPS else "syntactic"
-        groups[key].extend(v)
-    result["by_group"] = {
-        g: {"n": len(v), "acc": float(np.mean(v)) if v else float("nan")}
-        for g, v in groups.items() if v
-    }
+    # 语义/句法二分只对官方类别有意义：内置集的类别是猜出来的，
+    # 硬套这二分法会把 capital、gender 全算进「句法」，得出误导性的结论。
+    if has_official_cats:
+        groups: Dict[str, List[bool]] = {"semantic": [], "syntactic": []}
+        for cat, v in by_cat.items():
+            groups["semantic" if cat in eval_data.SEMANTIC_GROUPS
+                   else "syntactic"].extend(v)
+        result["by_group"] = {
+            g: {"n": len(v), "acc": float(np.mean(v)) if v else float("nan")}
+            for g, v in groups.items() if v
+        }
 
     items = [{"q": f"{q[0]}:{q[1]} :: {q[2]}:{p}", "gold": g}
              for q, p, g in zip(vq, pred_words, gold_words)]
@@ -233,7 +239,7 @@ def eval_analogy(emb: EmbeddingMatrix, questions, topk: int = 1, logger=None,
                     label or "?", result["accuracy"], N, n, n_oov_probe)
         logger.info("    严格口径（缺词的题算错）= %.4f   答案本身缺词的题: %d",
                     result["accuracy_total"], n_answer_oov)
-        for g, v in result["by_group"].items():
+        for g, v in (result.get("by_group") or {}).items():
             logger.info("    %-10s n=%6d  acc=%.4f", g, v["n"], v["acc"])
         by_cat_sorted = sorted(result["by_category"].items())
         if len(by_cat_sorted) <= 20:

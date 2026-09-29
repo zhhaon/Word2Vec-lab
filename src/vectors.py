@@ -16,8 +16,13 @@ import numpy as np
 # 存取
 # --------------------------------------------------------------------------
 def save_vectors(prefix, words: Sequence[str], vectors: np.ndarray,
-                 skip_special: bool = True) -> Tuple[Path, Path]:
-    """保存为 .npz + .txt 两种格式。"""
+                 skip_special: bool = True,
+                 write_txt: bool = True) -> Tuple[Path, Path]:
+    """保存为 .npz（始终写）与 .txt（word2vec 文本格式，可关掉）。
+
+    write_txt=False 用于训练途中的中间快照：7.1 万词 × 300 维的文本文件约 200 MB，
+    每个 epoch 存一份纯属浪费；需要文本格式时从最终的 vectors.txt 拿即可。
+    """
     prefix = Path(prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
     words = np.asarray(words, dtype=object)
@@ -27,6 +32,9 @@ def save_vectors(prefix, words: Sequence[str], vectors: np.ndarray,
     np.savez_compressed(npz_path, words=words, vectors=vectors)
 
     txt_path = prefix.with_suffix(".txt")
+    if not write_txt:
+        return npz_path, txt_path
+
     keep = np.array([not (w.startswith("<") and w.endswith(">")) for w in words])
     with open(txt_path, "w", encoding="utf-8") as f:
         idx = np.nonzero(keep)[0]

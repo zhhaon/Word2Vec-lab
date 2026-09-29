@@ -19,17 +19,19 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .early_stop import (EarlyStopper, canonical_metric, extract_metric,
+                         is_finite)
 from .dataset import PairStream
 from .model import Word2VecNeg, build_optimizer, estimate_parameters, lr_at_step
 from .preprocess import load_processed, preprocess as run_preprocess
 from .utils import (Timer, ensure_dir, format_hms, get_logger, human_int,
-                    load_config, resolve_path, set_seed)
+                    load_config, resolve_path, save_json, set_seed)
 from .vectors import save_vectors
 from .vocab import NegativeSampler, Vocab
 
@@ -249,6 +251,26 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
     prefetch = int(t_cfg.get("prefetch", 8))
     eval_every = int(cfg.get("eval", {}).get("every_epochs", 0) or 0)
 
+    # ---------------- 早停 ----------------
+    es_cfg = cfg.get("early_stopping", {}) or {}
+    es_enabled = bool(es_cfg.get("enabled", False))
+    monitor = str(es_cfg.get("monitor", "analogy_accuracy"))
+    export_best = bool(es_cfg.get("export_best", True))
+    stopper = EarlyStopper(
+        patience=int(es_cfg.get("patience", 3)),
+        min_delta=float(es_cfg.get("min_delta", 0.0)),
+        min_epochs=int(es_cfg.get("min_epochs", 1)),
+    ) if es_enabled else None
+
+    if eval_every > 0 or es_enabled:
+        prefetch_eval_sets(cfg, logger)
+    if es_enabled:
+        logger.info("早停: 开启  监控 %s（越大越好）  耐心 %d  最小间隔 %g  至少 %d 个 epoch",
+                    canonical_metric(monitor), stopper.patience,
+                    stopper.min_delta, stopper.min_epochs)
+    elif eval_every > 0:
+        logger.info("早停: 关闭")
+
     def sample_negatives(center_np: np.ndarray, context_np: np.ndarray) -> Optional[np.ndarray]:
         """按「排除正目标」的规则采负样本（在预取线程里做，不阻塞 GPU）。
 
@@ -285,13 +307,41 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
                 " + 排除中心词" if arch == "skipgram" else " + 排除上下文词")
     logger.info("-" * 74)
 
+    stopped_by_es = False
+    epoch = start_epoch - 1        # 防止 batch 生成器一个都没产出时下面用到未定义变量
+
     try:
         for epoch, center, context, negatives in prefetcher:
-            # 每个 epoch 交界处，按需做一次中途评估（看清指标随训练怎么变化）
+            # ---------------- epoch 交界处：完整评估 + 早停判断 ----------------
             if epoch != last_epoch:
+                finished = last_epoch          # 刚跑完的那个 epoch
                 last_epoch = epoch
-                if eval_every > 0 and epoch > 0 and epoch % eval_every == 0:
-                    _quick_eval(model, vocab, out_dir, epoch, cfg, logger)
+                if (eval_every > 0 and finished >= start_epoch
+                        and finished % eval_every == 0):
+                    res, metric = run_epoch_eval(
+                        model, vocab, out_dir, finished, cfg, monitor,
+                        writer=writer, global_step=global_step)
+
+                    # 先让 stopper 吃掉这次结果，再打日志 ——
+                    # 否则摘要里显示的是「上一轮」的最优值与耐心计数，会自相矛盾
+                    should_stop = stopper.step(finished, metric) if stopper else False
+                    log_eval_summary(logger, finished, res, metric, monitor, stopper)
+
+                    if stopper is not None:
+                        if stopper.best_epoch == finished:
+                            _save_best(model, vocab, out_dir, finished, metric,
+                                       monitor, cfg)
+                            logger.info("            指标提升，已保存最优权重 -> %s",
+                                        out_dir / "best.pt")
+                        if should_stop:
+                            logger.warning(
+                                "早停：连续 %d 次评估没有超过 %s %.4f，"
+                                "在 epoch %d 处停止训练。",
+                                stopper.patience,
+                                canonical_metric(monitor),
+                                stopper.best, finished + 1)
+                            stopped_by_es = True
+                            break
 
             if global_step >= total_steps:
                 global_step = total_steps - 1  # 学习率调度收尾
@@ -357,14 +407,41 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
 
     _save_checkpoint(out_dir / "last.pt", model, optimizer, min(epochs, epoch + 1),
                      global_step, cfg)
+
+    # 早停的意义就是拿到最好的那个模型，所以默认把最优权重导出成 vectors.*
+    used_best = False
+    if (stopper is not None and export_best and stopper.best_epoch >= 0
+            and (out_dir / "best.pt").exists()):
+        model.load_state_dict(
+            torch.load(out_dir / "best.pt", map_location=device, weights_only=True))
+        used_best = True
+
     npz_path, txt_path = export_vectors(model, vocab, out_dir, m_cfg.get("export", "input"))
-    logger.info("词向量已导出: %s / %s", npz_path.name, txt_path.name)
+    if used_best:
+        logger.info("词向量已导出: %s / %s  ← 取自最优 epoch %d（%s = %s）",
+                    npz_path.name, txt_path.name, stopper.best_epoch + 1,
+                    canonical_metric(monitor), _fmt(stopper.best))
+        logger.info("  last.pt 仍保留最后一个 epoch 的状态；最优副本另存为 best.pt / best_vectors.*")
+    else:
+        logger.info("词向量已导出: %s / %s", npz_path.name, txt_path.name)
+
     if neg_sampler.n_sampled:
         logger.info("负采样统计: 共 %s 个，其中与正目标/特殊符号冲突而被重抽 %s 个（%.4f%%）",
                     human_int(neg_sampler.n_sampled), human_int(neg_sampler.n_resampled),
                     100 * neg_sampler.resample_rate)
+
+    if stopper is not None:
+        save_json(stopper.to_dict(monitor, stopped=stopped_by_es),
+                  out_dir / "early_stopping.json")
+        logger.info("早停记录: %s", out_dir / "early_stopping.json")
+
+    reasons = []
+    if stopped_by_es:
+        reasons.append("早停")
+    if stopped_early:
+        reasons.append("时间预算")
     logger.info("总用时 %s%s", format_hms(timer.elapsed),
-                "（因时间预算提前停止）" if stopped_early else "")
+                ("（因" + "、".join(reasons) + "提前停止）") if reasons else "")
 
     if writer:
         writer.flush()
@@ -380,8 +457,6 @@ def train(cfg: Dict[str, Any], resume: Optional[str] = None,
                                     ev.get("analogy_file"), int(ev.get("topk", 10)),
                                     logger=logger,
                                     fetch_eval=bool(ev.get("fetch", True)))
-            from .utils import save_json
-
             save_json(res, out_dir / "eval.json")
         except Exception as exc:  # noqa: BLE001
             logger.warning("评估失败（不影响训练结果）: %s", exc)
@@ -415,35 +490,103 @@ def export_vectors(model, vocab: Vocab, out_dir: Path, how: str = "input"):
     return save_vectors(Path(out_dir) / "vectors", vocab.itos, mat)
 
 
-def _quick_eval(model, vocab: Vocab, out_dir: Path, epoch: int,
-                cfg: Dict[str, Any], logger) -> None:
-    """训练途中的轻量评估：导出当前向量并算指标，方便观察收敛过程。
+# --------------------------------------------------------------------------
+# 评估摘要输出
+# --------------------------------------------------------------------------
+def _fmt(v: Optional[float], nd: int = 4) -> str:
+    return "n/a" if not is_finite(v) else f"{float(v):.{nd}f}"
 
-    刻意固定用「内置小评测集」，不用配置里的 wordsim353 / google-analogy：
-      * 内置集不联网、秒级完成，不会打断训练节奏；
-      * 每个 epoch 都用同一套题，指标在 epoch 之间才可比。
-    正式的全量指标在训练结束后由主流程统一算。
+
+def log_eval_summary(logger, epoch: int, res: Dict, metric: Optional[float],
+                     monitor: str, stopper: Optional[EarlyStopper] = None) -> None:
+    """中途评估的紧凑输出（逐类别明细只在最终评估时打印）。"""
+    sim = res.get("similarity", {}) or {}
+    ana = res.get("analogy", {}) or {}
+    parts: List[str] = []
+    if sim:
+        parts.append(f"相似度 rho={_fmt(sim.get('spearman'))}"
+                     f"（覆盖 {100 * sim.get('coverage', 0):.0f}%）")
+    if ana:
+        parts.append(f"类比 acc={_fmt(ana.get('accuracy'))}"
+                     f"（{ana.get('n_evaluated', 0)}/{ana.get('n_questions', 0)} 题）")
+    logger.info("[epoch %d 评估] %s", epoch + 1, "  |  ".join(parts) or "无可用评测集")
+
+    grp = ana.get("by_group") or {}
+    if grp:   # 只有数据集自带官方分组时才有这一项（内置小集没有）
+        logger.info("            语义=%.4f  句法=%.4f",
+                    grp.get("semantic", {}).get("acc", float("nan")),
+                    grp.get("syntactic", {}).get("acc", float("nan")))
+
+    if stopper is not None:
+        logger.info("            监控 %s = %s   最优: %s   未提升 %d/%d",
+                    canonical_metric(monitor), _fmt(metric),
+                    stopper.summary(), stopper.bad_epochs, stopper.patience)
+
+
+def run_epoch_eval(model, vocab: Vocab, out_dir: Path, epoch: int,
+                   cfg: Dict[str, Any], monitor: str,
+                   logger=None, writer=None, global_step: int = 0,
+                   verbose: bool = False) -> Tuple[Dict, Optional[float]]:
+    """跑一次完整评估，导出当前词向量并落盘结果 JSON。
+
+    中途评估与最终评估用的是**同一套评测集**（都由配置里的 eval.similarity_file /
+    eval.analogy_file 决定），这样 epoch 之间的数字才可比、也才能真正拿来做早停。
+    verbose=False 时抑制逐类别明细，由调用方打印紧凑摘要。
     """
-    try:
-        from .evaluate import evaluate_from_npz
+    from .evaluate import evaluate_from_npz
 
-        ev = cfg.get("eval", {}) or {}
-        npz_path, _ = save_vectors(out_dir / f"epoch{epoch:03d}_vectors",
-                                   vocab.itos,
-                                   model.export_vectors(
-                                       cfg["model"].get("export", "input")
-                                   ).float().cpu().numpy())
-        res = evaluate_from_npz(npz_path,
-                                "data/eval/similarity_pairs.txt",
-                                "data/eval/analogy_questions.txt",
-                                int(ev.get("topk", 10)),
-                                fetch_eval=False, max_analogy=2000)
-        sim = res.get("similarity", {}).get("spearman", float("nan"))
-        ana = res.get("analogy", {}).get("accuracy", float("nan"))
-        logger.info("  [epoch %d 中途评估·内置子集] 相似度 rho=%.4f  类比 acc=%.4f",
-                    epoch, sim, ana)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("  中途评估失败: %s", exc)
+    ev = cfg.get("eval", {}) or {}
+    mat = model.export_vectors(cfg["model"].get("export", "input")).float().cpu().numpy()
+    # 中间快照只留 .npz：.txt 在大词表下每份上百 MB，每轮存一份太浪费
+    npz_path, _ = save_vectors(out_dir / f"epoch{epoch:03d}_vectors", vocab.itos, mat,
+                               write_txt=False)
+
+    res = evaluate_from_npz(
+        npz_path,
+        ev.get("similarity_file"),
+        ev.get("analogy_file"),
+        int(ev.get("topk", 10)),
+        logger=logger if verbose else None,
+        fetch_eval=bool(ev.get("fetch", True)),
+        max_analogy=ev.get("max_analogy"),
+    )
+    save_json(res, out_dir / f"eval_epoch{epoch:03d}.json")
+
+    metric = extract_metric(res, monitor)
+    if writer is not None:
+        sim = res.get("similarity", {}) or {}
+        ana = res.get("analogy", {}) or {}
+        for tag, val in (("eval/similarity_spearman", sim.get("spearman")),
+                         ("eval/analogy_accuracy", ana.get("accuracy")),
+                         ("eval/monitor", metric)):
+            if is_finite(val):
+                writer.add_scalar(tag, float(val), global_step)
+    return res, metric
+
+
+def _save_best(model, vocab: Vocab, out_dir: Path, epoch: int,
+               metric: Optional[float], monitor: str, cfg: Dict[str, Any]) -> None:
+    """在监控指标变好时保存最优权重与最优词向量。"""
+    torch.save(model.state_dict(), out_dir / "best.pt")
+    mat = model.export_vectors(cfg["model"].get("export", "input")).float().cpu().numpy()
+    save_vectors(out_dir / "best_vectors", vocab.itos, mat)
+    save_json({"epoch": epoch, "epoch_display": epoch + 1, "metric": metric,
+               "monitor": canonical_metric(monitor)},
+              out_dir / "best_meta.json")
+
+
+def prefetch_eval_sets(cfg: Dict[str, Any], logger) -> None:
+    """训练开始前把评测集准备好（免得训练跑完才发现下不动），并打印将用哪些集。"""
+    from . import eval_data
+
+    ev = cfg.get("eval", {}) or {}
+    fetch_on = bool(ev.get("fetch", True))
+    for kind, spec, loader in (("相似度", ev.get("similarity_file"), eval_data.load_similarity),
+                               ("类比  ", ev.get("analogy_file"), eval_data.load_analogy)):
+        if not spec:
+            continue
+        label, items = loader(spec, fetch_on, quiet=False)
+        logger.info("%s评测集: %s（%d 项）", kind, label, len(items))
 
 
 # --------------------------------------------------------------------------
@@ -470,11 +613,18 @@ def main() -> None:
     p.add_argument("--set", dest="overrides", action="append",
                    help="覆盖配置，例如 --set train.device=cpu --set model.dim=100")
     p.add_argument("--resume", default=None, help="从检查点续训，例如 runs/full/last.pt")
-    p.add_argument("--no-eval", action="store_true", help="训练后不做评估")
+    p.add_argument("--no-eval", action="store_true",
+                   help="不做任何评估（含中途评估，并自动关闭早停）")
     p.add_argument("--viz", action="store_true", help="训练后自动出可视化图")
     a = p.parse_args()
 
     cfg = load_config(a.config, parse_overrides(a.overrides))
+    if a.no_eval:
+        # --no-eval 是「这一轮不要评估」，中途评估和早停（依赖评估指标）也一并关掉，
+        # 否则会出现「说了不评估却每轮都在评估、还提前停了」这种意外
+        cfg.setdefault("eval", {})["every_epochs"] = 0
+        cfg.setdefault("early_stopping", {})["enabled"] = False
+
     try:
         train(cfg, resume=a.resume, do_eval=not a.no_eval, do_viz=a.viz)
     except RuntimeError as exc:

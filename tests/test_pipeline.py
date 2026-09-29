@@ -411,6 +411,62 @@ def test_cached_full_datasets() -> None:
     check(all(len(q) == 5 for q in qs), "每题都带类别标签")
 
 
+def test_early_stopping() -> None:
+    print("\n[12] 早停逻辑")
+    from src.early_stop import EarlyStopper, extract_metric
+
+    # ---- 指标提取 ----
+    res = {"analogy": {"accuracy": 0.42}, "similarity": {"spearman": 0.62}}
+    check(extract_metric(res, "analogy_accuracy") == 0.42, "取类比准确率")
+    check(extract_metric(res, "analogy") == 0.42, "指标别名有效")
+    check(extract_metric(res, "similarity_spearman") == 0.62, "取相似度 Spearman")
+    check(abs(extract_metric(res, "mean") - 0.52) < 1e-9, "mean = 两者平均")
+
+    nan_res = {"analogy": {"accuracy": float("nan")}, "similarity": {"spearman": 0.5}}
+    check(extract_metric(nan_res, "analogy_accuracy") is None, "nan 视为取不到")
+    check(extract_metric(nan_res, "mean") == 0.5, "mean 会跳过 nan 的那一项")
+    check(extract_metric({}, "mean") is None, "结果为空时返回 None")
+
+    # ---- patience：连续无提升就停 ----
+    es = EarlyStopper(patience=2, min_delta=0.0, min_epochs=1)
+    check(es.step(0, 0.10) is False, "首次结果必为最优，不停止")
+    check(es.best_epoch == 0 and abs(es.best - 0.10) < 1e-12, "记录最优 epoch")
+    check(es.step(1, 0.11) is False, "有提升 -> 重置耐心")
+    check(es.bad_epochs == 0, "提升后耐心计数归零")
+    check(es.step(2, 0.11) is False, "第 1 次未提升，继续")
+    check(es.bad_epochs == 1, "耐心计数 = 1")
+    check(es.step(3, 0.09) is True, "第 2 次未提升 -> 触发早停")
+    check(es.best_epoch == 1, f"最优仍是 epoch 2（实际 {(es.best_epoch, es.best)}）")
+
+    # ---- min_delta：小幅度提升不算提升 ----
+    es2 = EarlyStopper(patience=1, min_delta=0.05, min_epochs=1)
+    es2.step(0, 0.30)
+    check(es2.step(1, 0.32) is True, "提升 0.02 < min_delta 0.05，不算提升 -> 停")
+    es3 = EarlyStopper(patience=1, min_delta=0.05, min_epochs=1)
+    es3.step(0, 0.30)
+    check(es3.step(1, 0.40) is False, "提升 0.10 > min_delta，算提升")
+
+    # ---- min_epochs：跑不够轮数不许停 ----
+    es4 = EarlyStopper(patience=1, min_delta=0.0, min_epochs=5)
+    es4.step(0, 0.50)
+    check(es4.step(1, 0.10) is False, "epoch 2 < min_epochs 5，即使没提升也不停")
+    check(es4.step(4, 0.10) is True, "epoch 5 达到 min_epochs 才允许停")
+
+    # ---- 指标取不到时不应消耗耐心 ----
+    es5 = EarlyStopper(patience=1, min_delta=0.0, min_epochs=1)
+    es5.step(0, 0.20)
+    check(es5.step(1, None) is False, "指标为 None 不计为未提升")
+    check(es5.step(2, float("nan")) is False, "指标为 nan 不计为未提升")
+    check(es5.bad_epochs == 0, "耐心计数未被污染")
+    check(es5.step(3, 0.10) is True, "之后一次真正的未提升就会停")
+
+    # ---- 落盘结构 ----
+    d = es5.to_dict("analogy", stopped=True)
+    check(d["monitor"] == "analogy_accuracy" and d["best_epoch_display"] == 1
+          and d["stopped_by_early_stopping"] is True, f"to_dict 正确: {d['monitor']}")
+    check(len(d["history"]) == 4, f"历史记录完整: {len(d['history'])} 次")
+
+
 def main() -> None:
     try:
         for stream in (sys.stdout, sys.stderr):
@@ -425,7 +481,8 @@ def main() -> None:
                test_pair_stream_skipgram, test_pair_stream_cbow,
                test_sentence_boundary, test_vectors_io,
                test_preprocess_roundtrip, test_eval_data_parsers,
-               test_analogy_eval_logic, test_cached_full_datasets):
+               test_analogy_eval_logic, test_cached_full_datasets,
+               test_early_stopping):
         fn()
     print("\n" + "=" * 66)
     print(f" 全部通过：{PASS} 项检查")
